@@ -76,6 +76,12 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('seek', currentTime);
   });
 
+  socket.on('admin_time_update', (currentTime) => {
+    if (!socket.isAdmin) return;
+    playerState.currentTime = currentTime;
+    playerState.updatedAt = Date.now();
+  });
+
   socket.on('sync_request', () => {
     // Calculate expected current time if playing
     let time = playerState.currentTime;
