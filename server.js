@@ -4,15 +4,17 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
 const ffprobePath = require('@ffprobe-installer/ffprobe').path;
-// Fallback to system ffprobe if @ffprobe-installer/ffprobe fails (e.g. SIGSEGV on some systems)
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+ffmpeg.setFfmpegPath(ffmpegPath);
+// Fallback to system ffprobe/ffmpeg if installer fails (e.g. SIGSEGV on some systems)
 try {
   const { execSync } = require('child_process');
-  execSync(`${ffprobePath} -version`);
-  // If it doesn't throw, we could use it, but wait, the SIGSEGV happens on the ACTUAL call to ffprobe, not -version.
-  // Actually let's just use the system one if available
   const sysFfprobe = execSync('which ffprobe').toString().trim();
   if (sysFfprobe) ffmpeg.setFfprobePath(sysFfprobe);
   else ffmpeg.setFfprobePath(ffprobePath);
+
+  const sysFfmpeg = execSync('which ffmpeg').toString().trim();
+  if (sysFfmpeg) ffmpeg.setFfmpegPath(sysFfmpeg);
 } catch (e) {
   ffmpeg.setFfprobePath(ffprobePath);
 }
@@ -98,9 +100,9 @@ app.get('/audio_stream', (req, res) => {
     ])
     .outputOptions([
         '-map 0:a:' + track,
-        '-c:a libopus',
+        '-c:a aac',
         '-b:a 128k',
-        '-f webm'
+        '-f adts'
     ])
     .on('error', (err) => {
         console.error('FFmpeg audio stream error:', err.message);

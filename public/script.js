@@ -37,7 +37,10 @@ function syncAudioTrack(url, track, startTime, isPlaying) {
             audioPlayer = new Audio();
         }
         audioPlayer.src = '/audio_stream?url=' + encodeURIComponent(url) + '&track=' + track + '&start=' + startTime;
-        if (isPlaying) {
+        // Let the videoPlayer's 'playing' event handle the audioPlayer.play()
+        // This ensures the audio doesn't start before the video does,
+        // avoiding desync if video takes longer to buffer.
+        if (isPlaying && !videoPlayer.paused && videoPlayer.readyState >= 3) {
             const playPromise = audioPlayer.play();
             if (playPromise !== undefined) {
                 playPromise.catch(e => console.log("Audio autoplay prevented", e));
@@ -173,8 +176,19 @@ videoPlayer.addEventListener('playing', () => {
 videoPlayer.addEventListener('volumechange', () => {
     if (audioPlayer) {
         audioPlayer.volume = videoPlayer.volume;
+        // Aggressively prevent native video from unmuting if track > 0
+        if (currentTrack > 0 && !videoPlayer.muted) {
+            videoPlayer.muted = true;
+        }
     }
 });
+
+// Extra safeguard to enforce muting periodically in case browser unmutes it
+setInterval(() => {
+    if (currentTrack > 0 && !videoPlayer.muted) {
+        videoPlayer.muted = true;
+    }
+}, 500);
 
 videoPlayer.addEventListener('seeked', () => {
     if (audioPlayer) {
@@ -393,6 +407,9 @@ playerOverlay.addEventListener('click', (e) => {
     // Allow users to tap to bypass autoplay policies
     if (autoplayBlocked && !isAdmin) {
         const playPromise = videoPlayer.play();
+        if (audioPlayer && currentTrack > 0) {
+            audioPlayer.play().catch(e => console.log("Audio still blocked", e));
+        }
         if (playPromise !== undefined) {
             playPromise.then(() => {
                 autoplayBlocked = false;
