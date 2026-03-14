@@ -4,7 +4,18 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
 const ffprobePath = require('@ffprobe-installer/ffprobe').path;
-ffmpeg.setFfprobePath(ffprobePath);
+// Fallback to system ffprobe if @ffprobe-installer/ffprobe fails (e.g. SIGSEGV on some systems)
+try {
+  const { execSync } = require('child_process');
+  execSync(`${ffprobePath} -version`);
+  // If it doesn't throw, we could use it, but wait, the SIGSEGV happens on the ACTUAL call to ffprobe, not -version.
+  // Actually let's just use the system one if available
+  const sysFfprobe = execSync('which ffprobe').toString().trim();
+  if (sysFfprobe) ffmpeg.setFfprobePath(sysFfprobe);
+  else ffmpeg.setFfprobePath(ffprobePath);
+} catch (e) {
+  ffmpeg.setFfprobePath(ffprobePath);
+}
 const axios = require('axios');
 
 const app = express();
@@ -55,6 +66,12 @@ app.get('/stream', async (req, res) => {
 
     res.writeHead(response.status, headers);
     response.data.pipe(res);
+
+    req.on('close', () => {
+      if (response.data && typeof response.data.destroy === 'function') {
+        response.data.destroy();
+      }
+    });
   } catch (error) {
     if (error.response) {
       res.status(error.response.status).send(error.message);

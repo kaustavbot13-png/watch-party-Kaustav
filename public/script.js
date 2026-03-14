@@ -77,8 +77,8 @@ loadVideoBtn.addEventListener('click', () => {
                 audioTrackSelector.innerHTML = '';
                 response.tracks.forEach(track => {
                     const option = document.createElement('option');
-                    option.value = track.index;
-                    option.textContent = track.language || `Track ${track.index}`;
+                    option.value = track.id;
+                    option.textContent = track.language || `Track ${track.id + 1}`;
                     if (track.title) option.textContent += ` (${track.title})`;
                     audioTrackSelector.appendChild(option);
                 });
@@ -195,7 +195,8 @@ function updatePlayerState(state) {
 
     isSettingState = true;
 
-    if (Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
+    // Only force time update if not seeking, to avoid interrupting buffering
+    if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
         videoPlayer.currentTime = state.currentTime;
     }
 
@@ -238,7 +239,7 @@ socket.on('sync_state', (state) => {
             videoPlayer.src = proxyUrl;
             videoUrlInput.value = state.videoUrl;
 
-            if (Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
+            if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
                 videoPlayer.currentTime = state.currentTime;
             }
 
@@ -254,7 +255,7 @@ socket.on('sync_state', (state) => {
         } else {
             // Already loaded, just sync time
             isSettingState = true;
-            if (Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
+            if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
                 videoPlayer.currentTime = state.currentTime;
             }
             if (state.isPlaying) {
