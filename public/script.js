@@ -64,6 +64,16 @@ loadVideoBtn.addEventListener('click', () => {
     const url = videoUrlInput.value.trim();
     if (url) {
         socket.emit('set_video', url);
+
+        // Update local admin player immediately
+        isSettingState = true;
+        videoPlayer.src = url;
+        videoPlayer.currentTime = 0;
+        const playPromise = videoPlayer.play();
+        if (playPromise !== undefined) {
+            playPromise.catch(e => console.log("Autoplay prevented or unsupported format:", e));
+        }
+        setTimeout(() => isSettingState = false, 100);
     }
 });
 
@@ -84,6 +94,36 @@ videoPlayer.addEventListener('seeked', () => {
     if (isAdmin && !isSettingState) {
         socket.emit('seek', videoPlayer.currentTime);
     }
+});
+
+// Handle Video Errors
+videoPlayer.addEventListener('error', (e) => {
+    const error = videoPlayer.error;
+    let errorMessage = "Unknown Error";
+    if (error) {
+        switch (error.code) {
+            case error.MEDIA_ERR_ABORTED:
+                errorMessage = "You aborted the video playback.";
+                break;
+            case error.MEDIA_ERR_NETWORK:
+                errorMessage = "A network error caused the video download to fail part-way. The link token might be expired.";
+                break;
+            case error.MEDIA_ERR_DECODE:
+                errorMessage = "The video playback was aborted due to a corruption problem or because the video used features your browser did not support.";
+                break;
+            case error.MEDIA_ERR_SRC_NOT_SUPPORTED:
+                errorMessage = "The video could not be loaded, either because the server or network failed or because the format is not supported (e.g., .mkv files are often not supported natively by browsers). Try an .mp4 link.";
+                break;
+            default:
+                errorMessage = "An unknown error occurred.";
+                break;
+        }
+    }
+
+    if (isAdmin) {
+        alert("Video Error: " + errorMessage);
+    }
+    console.error("Video Error:", errorMessage, e);
 });
 
 // Sync Logic from Server -> Client
