@@ -7,11 +7,8 @@ const loginBtn = document.getElementById('login-btn');
 const loginError = document.getElementById('login-error');
 
 const adminControls = document.getElementById('admin-controls');
-const videoUrlInput = document.getElementById('video-url');
-const loadVideoBtn = document.getElementById('load-video-btn');
-const trackSelectionGroup = document.getElementById('track-selection-group');
-const audioTrackSelector = document.getElementById('audio-track-selector');
-const runVideoBtn = document.getElementById('run-video-btn');
+const playlistContainer = document.getElementById('playlist-container');
+const addLinkBtn = document.getElementById('add-link-btn');
 
 const videoPlayer = document.getElementById('video-player');
 const playerOverlay = document.getElementById('player-overlay');
@@ -22,6 +19,8 @@ let isAdmin = false;
 let isSettingState = false;
 let audioPlayer = null;
 let currentTrack = 0;
+let currentVideoUrl = '';
+let currentPlaylistItem = null;
 
 function syncAudioTrack(url, track, startTime, isPlaying) {
     if (track == 0 || !url) {
@@ -90,64 +89,106 @@ loginBtn.addEventListener('click', () => {
     });
 });
 
-// Admin Control Logic
-loadVideoBtn.addEventListener('click', () => {
-    if (!isAdmin) return;
-    const url = videoUrlInput.value.trim();
-    if (url) {
-        loadVideoBtn.disabled = true;
-        loadVideoBtn.textContent = 'Fetching Tracks...';
+// Helper to attach events to a playlist item
+function attachPlaylistItemEvents(itemDiv) {
+    const loadBtn = itemDiv.querySelector('.load-video-btn');
+    const urlInput = itemDiv.querySelector('.video-url');
+    const trackGroup = itemDiv.querySelector('.track-selection-group');
+    const trackSelector = itemDiv.querySelector('.audio-track-selector');
+    const runBtn = itemDiv.querySelector('.run-video-btn');
+    const removeBtn = itemDiv.querySelector('.remove-link-btn');
 
-        socket.emit('fetch_audio_tracks', url, (response) => {
-            loadVideoBtn.disabled = false;
-            loadVideoBtn.textContent = 'Load Video';
+    loadBtn.addEventListener('click', () => {
+        if (!isAdmin) return;
+        const url = urlInput.value.trim();
+        if (url) {
+            loadBtn.disabled = true;
+            loadBtn.textContent = 'Fetching...';
 
-            if (response.success && response.tracks && response.tracks.length > 0) {
-                audioTrackSelector.innerHTML = '';
-                response.tracks.forEach(track => {
-                    const option = document.createElement('option');
-                    option.value = track.id;
-                    option.textContent = track.language || `Track ${track.id + 1}`;
-                    if (track.title) option.textContent += ` (${track.title})`;
-                    audioTrackSelector.appendChild(option);
-                });
-            } else {
-                audioTrackSelector.innerHTML = '<option value="0">Default Track</option>';
-            }
-            trackSelectionGroup.classList.remove('hidden');
-        });
-    }
-});
+            socket.emit('fetch_audio_tracks', url, (response) => {
+                loadBtn.disabled = false;
+                loadBtn.textContent = 'Load';
 
-runVideoBtn.addEventListener('click', () => {
-    if (!isAdmin) return;
-    const url = videoUrlInput.value.trim();
-    const trackIndex = parseInt(audioTrackSelector.value) || 0;
-
-    if (url) {
-        socket.emit('set_video', { url, audioTrack: trackIndex });
-
-        // Update local admin player immediately
-        isSettingState = true;
-        videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
-        videoPlayer.currentTime = 0;
-        syncAudioTrack(url, trackIndex, 0, true);
-
-        // Wait for metadata to load to apply audio track if possible
-        videoPlayer.onloadedmetadata = () => {
-             if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
-                 for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
-                     videoPlayer.audioTracks[i].enabled = (i === trackIndex);
-                 }
-             }
-        };
-
-        const playPromise = videoPlayer.play();
-        if (playPromise !== undefined) {
-            playPromise.catch(e => console.log("Autoplay prevented or unsupported format:", e));
+                if (response.success && response.tracks && response.tracks.length > 0) {
+                    trackSelector.innerHTML = '';
+                    response.tracks.forEach(track => {
+                        const option = document.createElement('option');
+                        option.value = track.id;
+                        option.textContent = track.language || `Track ${track.id + 1}`;
+                        if (track.title) option.textContent += ` (${track.title})`;
+                        trackSelector.appendChild(option);
+                    });
+                } else {
+                    trackSelector.innerHTML = '<option value="0">Default Track</option>';
+                }
+                trackGroup.classList.remove('hidden');
+            });
         }
-        setTimeout(() => isSettingState = false, 100);
-    }
+    });
+
+    runBtn.addEventListener('click', () => {
+        if (!isAdmin) return;
+        const url = urlInput.value.trim();
+        const trackIndex = parseInt(trackSelector.value) || 0;
+
+        if (url) {
+            currentVideoUrl = url;
+            currentPlaylistItem = itemDiv;
+            socket.emit('set_video', { url, audioTrack: trackIndex });
+
+            // Update local admin player immediately
+            isSettingState = true;
+            videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
+            videoPlayer.currentTime = 0;
+            syncAudioTrack(url, trackIndex, 0, true);
+
+            // Wait for metadata to load to apply audio track if possible
+            videoPlayer.onloadedmetadata = () => {
+                 if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
+                     for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
+                         videoPlayer.audioTracks[i].enabled = (i === trackIndex);
+                     }
+                 }
+            };
+
+            const playPromise = videoPlayer.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(e => console.log("Autoplay prevented or unsupported format:", e));
+            }
+            setTimeout(() => isSettingState = false, 100);
+        }
+    });
+
+    removeBtn.addEventListener('click', () => {
+        itemDiv.remove();
+    });
+}
+
+// Attach events to the initial playlist item
+const initialItems = playlistContainer.querySelectorAll('.playlist-item');
+initialItems.forEach(attachPlaylistItemEvents);
+
+// Admin Control Logic
+addLinkBtn.addEventListener('click', () => {
+    if (!isAdmin) return;
+
+    const newItemDiv = document.createElement('div');
+    newItemDiv.className = 'playlist-item';
+    newItemDiv.innerHTML = `
+        <div class="control-group">
+            <input type="text" class="video-url" placeholder="Direct Video URL (e.g., .mp4, .webm)">
+            <button class="load-video-btn">Load</button>
+            <button class="remove-link-btn" style="background-color: #ff5252;">Remove</button>
+        </div>
+        <div class="control-group track-selection-group hidden" style="margin-top: 10px;">
+            <select class="audio-track-selector">
+                <option value="0">Default Track</option>
+            </select>
+            <button class="run-video-btn">Run</button>
+        </div>
+    `;
+    playlistContainer.appendChild(newItemDiv);
+    attachPlaylistItemEvents(newItemDiv);
 });
 
 // Player Event Listeners for Admin -> Server
@@ -193,7 +234,7 @@ setInterval(() => {
 videoPlayer.addEventListener('seeked', () => {
     if (audioPlayer) {
         // Must reload the audio stream from the new start time since it's an ffmpeg stream
-        const url = videoUrlInput.value.trim() || videoPlayer.getAttribute('src').replace('/stream?url=', ''); // Fallback for guest if needed, but guest doesn't seek natively
+        const url = currentVideoUrl || videoPlayer.getAttribute('src').replace('/stream?url=', ''); // Fallback for guest if needed, but guest doesn't seek natively
         const decodedUrl = decodeURIComponent(url);
         // To avoid re-fetching on minor sync drift, only update if difference is noticeable. But this is the native 'seeked' event.
         // It's fired when admin scrubs the bar or guest receives a big sync update.
@@ -201,6 +242,35 @@ videoPlayer.addEventListener('seeked', () => {
     }
     if (isAdmin && !isSettingState) {
         socket.emit('seek', videoPlayer.currentTime);
+    }
+});
+
+videoPlayer.addEventListener('ended', () => {
+    if (!isAdmin) return;
+
+    // Find the currently playing item in the playlist
+    const items = Array.from(playlistContainer.querySelectorAll('.playlist-item'));
+
+    let currentIndex = items.indexOf(currentPlaylistItem);
+
+    // Fallback logic if the exact item ref was lost
+    if (currentIndex === -1) {
+        for (let i = 0; i < items.length; i++) {
+            const inputUrl = items[i].querySelector('.video-url').value.trim();
+            if (inputUrl === currentVideoUrl) {
+                currentIndex = i;
+                break;
+            }
+        }
+    }
+
+    // If there is a next item, run it
+    if (currentIndex !== -1 && currentIndex + 1 < items.length) {
+        const nextItem = items[currentIndex + 1];
+        const nextRunBtn = nextItem.querySelector('.run-video-btn');
+        if (nextRunBtn) {
+            nextRunBtn.click();
+        }
     }
 });
 
@@ -301,7 +371,13 @@ socket.on('sync_state', (state) => {
         if (proxyUrl !== currentSrc && state.videoUrl !== '') {
             isSettingState = true;
             videoPlayer.src = proxyUrl;
-            videoUrlInput.value = state.videoUrl;
+            currentVideoUrl = state.videoUrl;
+
+            // Try to update an input if one exists with this URL, or just let it be.
+            const inputs = document.querySelectorAll('.video-url');
+            if (inputs.length > 0 && inputs[0].value === '') {
+                inputs[0].value = state.videoUrl;
+            }
 
             syncAudioTrack(state.videoUrl, state.audioTrack, state.currentTime, state.isPlaying);
 
@@ -338,8 +414,10 @@ socket.on('sync_state', (state) => {
 });
 
 socket.on('video_changed', (data) => {
+    const url = typeof data === 'string' ? data : data.url;
+    currentVideoUrl = url;
+
     if (!isAdmin) {
-        const url = typeof data === 'string' ? data : data.url;
         const trackIndex = typeof data === 'object' && data.audioTrack !== undefined ? data.audioTrack : 0;
 
         videoPlayer.src = '/stream?url=' + encodeURIComponent(url);

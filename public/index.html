@@ -18,16 +18,22 @@
 
         <div id="admin-controls" class="hidden">
             <h3>Admin Controls</h3>
-            <div class="control-group">
-                <input type="text" id="video-url" placeholder="Direct Video URL (e.g., .mp4, .webm)">
-                <button id="load-video-btn">Load Video</button>
+            <div id="playlist-container">
+                <div class="playlist-item">
+                    <div class="control-group">
+                        <input type="text" class="video-url" placeholder="Direct Video URL (e.g., .mp4, .webm)">
+                        <button class="load-video-btn">Load</button>
+                        <button class="remove-link-btn" style="background-color: #ff5252;">Remove</button>
+                    </div>
+                    <div class="control-group track-selection-group hidden" style="margin-top: 10px;">
+                        <select class="audio-track-selector">
+                            <option value="0">Default Track</option>
+                        </select>
+                        <button class="run-video-btn">Run</button>
+                    </div>
+                </div>
             </div>
-            <div class="control-group hidden" id="track-selection-group" style="margin-top: 10px;">
-                <select id="audio-track-selector">
-                    <option value="0">Default Track</option>
-                </select>
-                <button id="run-video-btn">Run</button>
-            </div>
+            <button id="add-link-btn" style="margin-top: 15px;">+ Add Link</button>
             <p>You have control over the player. Actions will sync to all users.</p>
         </div>
 
