@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: sync-video-player
+    env: node
+    plan: free
+    buildCommand: "npm install"
+    startCommand: "node server.js"
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: ADMIN_PASSWORD
+        value: abd123abd
