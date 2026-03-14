@@ -126,9 +126,13 @@ videoPlayer.addEventListener('error', (e) => {
     console.error("Video Error:", errorMessage, e);
 });
 
+let autoplayBlocked = false;
+
 // Sync Logic from Server -> Client
 function updatePlayerState(state) {
-    if (state.videoUrl !== videoPlayer.src && state.videoUrl !== '') {
+    // Compare against getAttribute to avoid absolute URL mismatch
+    const currentSrc = videoPlayer.getAttribute('src');
+    if (state.videoUrl !== currentSrc && state.videoUrl !== '') {
         videoPlayer.src = state.videoUrl;
     }
 
@@ -143,6 +147,10 @@ function updatePlayerState(state) {
         if (playPromise !== undefined) {
             playPromise.catch(e => {
                 console.log("Autoplay prevented or interrupted:", e);
+                autoplayBlocked = true;
+                if (!isAdmin) {
+                    roleStatus.textContent = "Tap video to play (Autoplay blocked)";
+                }
             });
         }
     } else {
@@ -166,6 +174,43 @@ socket.on('init_state', (state) => {
 socket.on('sync_state', (state) => {
     if (!isAdmin) {
         updatePlayerState(state);
+    } else {
+        // Handle admin refresh
+        const currentSrc = videoPlayer.getAttribute('src');
+        if (state.videoUrl !== currentSrc && state.videoUrl !== '') {
+            isSettingState = true;
+            videoPlayer.src = state.videoUrl;
+            videoUrlInput.value = state.videoUrl;
+
+            if (Math.abs(videoPlayer.currentTime - state.currentTime) > 1) {
+                videoPlayer.currentTime = state.currentTime;
+            }
+
+            if (state.isPlaying) {
+                const playPromise = videoPlayer.play();
+                if (playPromise !== undefined) {
+                    playPromise.catch(e => console.log("Admin Autoplay prevented:", e));
+                }
+            } else {
+                videoPlayer.pause();
+            }
+            setTimeout(() => isSettingState = false, 100);
+        } else {
+            // Already loaded, just sync time
+            isSettingState = true;
+            if (Math.abs(videoPlayer.currentTime - state.currentTime) > 1) {
+                videoPlayer.currentTime = state.currentTime;
+            }
+            if (state.isPlaying) {
+                const playPromise = videoPlayer.play();
+                if (playPromise !== undefined) {
+                    playPromise.catch(e => console.log("Admin Autoplay prevented:", e));
+                }
+            } else {
+                videoPlayer.pause();
+            }
+            setTimeout(() => isSettingState = false, 100);
+        }
     }
 });
 
@@ -174,7 +219,11 @@ socket.on('video_changed', (url) => {
         videoPlayer.src = url;
         const playPromise = videoPlayer.play();
         if (playPromise !== undefined) {
-            playPromise.catch(e => console.log("Autoplay prevented:", e));
+            playPromise.catch(e => {
+                console.log("Autoplay prevented:", e);
+                autoplayBlocked = true;
+                roleStatus.textContent = "Tap video to play (Autoplay blocked)";
+            });
         }
     }
 });
@@ -185,7 +234,11 @@ socket.on('play', (currentTime) => {
         videoPlayer.currentTime = currentTime;
         const playPromise = videoPlayer.play();
         if (playPromise !== undefined) {
-            playPromise.catch(e => console.log("Autoplay prevented:", e));
+            playPromise.catch(e => {
+                console.log("Autoplay prevented:", e);
+                autoplayBlocked = true;
+                roleStatus.textContent = "Tap video to play (Autoplay blocked)";
+            });
         }
         setTimeout(() => isSettingState = false, 100);
     }
@@ -212,12 +265,26 @@ socket.on('seek', (currentTime) => {
 playerOverlay.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    // Do nothing, just block the click. The user sees the play state defined by server.
+
+    // Allow users to tap to bypass autoplay policies
+    if (autoplayBlocked && !isAdmin) {
+        const playPromise = videoPlayer.play();
+        if (playPromise !== undefined) {
+            playPromise.then(() => {
+                autoplayBlocked = false;
+                roleStatus.textContent = 'Viewing as: Guest';
+                // Sync to make sure time is right
+                socket.emit('sync_request');
+            }).catch(err => {
+                console.log("Still blocked", err);
+            });
+        }
+    }
 });
 
 // Sync every few seconds for guests just to be sure
 setInterval(() => {
-    if (!isAdmin && videoPlayer.src) {
+    if (!isAdmin && videoPlayer.getAttribute('src')) {
         socket.emit('sync_request');
     }
 }, 5000);
