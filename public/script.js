@@ -20,6 +20,32 @@ const roleStatus = document.getElementById('role-status');
 // State
 let isAdmin = false;
 let isSettingState = false;
+let audioPlayer = null;
+let currentTrack = 0;
+
+function syncAudioTrack(url, track, startTime, isPlaying) {
+    if (track == 0 || !url) {
+        if (audioPlayer) {
+            audioPlayer.pause();
+            audioPlayer.removeAttribute('src');
+            audioPlayer = null;
+        }
+        videoPlayer.muted = false;
+    } else {
+        videoPlayer.muted = true;
+        if (!audioPlayer) {
+            audioPlayer = new Audio();
+        }
+        audioPlayer.src = '/audio_stream?url=' + encodeURIComponent(url) + '&track=' + track + '&start=' + startTime;
+        if (isPlaying) {
+            const playPromise = audioPlayer.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(e => console.log("Audio autoplay prevented", e));
+            }
+        }
+    }
+    currentTrack = track;
+}
 
 // Helpers
 function setGuestMode() {
@@ -100,15 +126,12 @@ runVideoBtn.addEventListener('click', () => {
 
         // Update local admin player immediately
         isSettingState = true;
-        videoPlayer.src = '/stream?url=' + encodeURIComponent(url) + '&track=' + trackIndex;
+        videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
         videoPlayer.currentTime = 0;
+        syncAudioTrack(url, trackIndex, 0, true);
 
         // Wait for metadata to load to apply audio track if possible
         videoPlayer.onloadedmetadata = () => {
-             // In HTML5, audioTracks is not widely supported in all browsers for normal video element
-             // It mostly works with HLS/DASH. For a simple mp4, setting the track is browser-dependent
-             // and often not possible via plain JS on a standard <video> without MSE.
-             // However, if the browser supports it:
              if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
                  for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
                      videoPlayer.audioTracks[i].enabled = (i === trackIndex);
@@ -126,18 +149,42 @@ runVideoBtn.addEventListener('click', () => {
 
 // Player Event Listeners for Admin -> Server
 videoPlayer.addEventListener('play', () => {
+    if (audioPlayer) audioPlayer.play();
     if (isAdmin && !isSettingState) {
         socket.emit('play', videoPlayer.currentTime);
     }
 });
 
 videoPlayer.addEventListener('pause', () => {
+    if (audioPlayer) audioPlayer.pause();
     if (isAdmin && !isSettingState) {
         socket.emit('pause', videoPlayer.currentTime);
     }
 });
 
+videoPlayer.addEventListener('waiting', () => {
+    if (audioPlayer) audioPlayer.pause();
+});
+
+videoPlayer.addEventListener('playing', () => {
+    if (audioPlayer) audioPlayer.play();
+});
+
+videoPlayer.addEventListener('volumechange', () => {
+    if (audioPlayer) {
+        audioPlayer.volume = videoPlayer.volume;
+    }
+});
+
 videoPlayer.addEventListener('seeked', () => {
+    if (audioPlayer) {
+        // Must reload the audio stream from the new start time since it's an ffmpeg stream
+        const url = videoUrlInput.value.trim() || videoPlayer.getAttribute('src').replace('/stream?url=', ''); // Fallback for guest if needed, but guest doesn't seek natively
+        const decodedUrl = decodeURIComponent(url);
+        // To avoid re-fetching on minor sync drift, only update if difference is noticeable. But this is the native 'seeked' event.
+        // It's fired when admin scrubs the bar or guest receives a big sync update.
+        syncAudioTrack(decodedUrl, currentTrack, videoPlayer.currentTime, !videoPlayer.paused);
+    }
     if (isAdmin && !isSettingState) {
         socket.emit('seek', videoPlayer.currentTime);
     }
@@ -179,19 +226,22 @@ let autoplayBlocked = false;
 function updatePlayerState(state) {
     // Compare against getAttribute to avoid absolute URL mismatch
     const currentSrc = videoPlayer.getAttribute('src');
-    const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl) + '&track=' + state.audioTrack;
+    const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
 
     if (proxyUrl !== currentSrc && state.videoUrl !== '') {
         videoPlayer.src = proxyUrl;
-    }
 
-    videoPlayer.onloadedmetadata = () => {
-         if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
-             for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
-                 videoPlayer.audioTracks[i].enabled = (i === state.audioTrack);
+        // Setup separate audio stream if needed
+        syncAudioTrack(state.videoUrl, state.audioTrack, state.currentTime, state.isPlaying);
+
+        videoPlayer.onloadedmetadata = () => {
+             if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
+                 for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
+                     videoPlayer.audioTracks[i].enabled = (i === state.audioTrack);
+                 }
              }
-         }
-    };
+        };
+    }
 
     isSettingState = true;
 
@@ -233,19 +283,13 @@ socket.on('sync_state', (state) => {
     } else {
         // Handle admin refresh
         const currentSrc = videoPlayer.getAttribute('src');
-        const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl) + '&track=' + state.audioTrack;
+        const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
         if (proxyUrl !== currentSrc && state.videoUrl !== '') {
             isSettingState = true;
             videoPlayer.src = proxyUrl;
             videoUrlInput.value = state.videoUrl;
 
-            videoPlayer.onloadedmetadata = () => {
-                 if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
-                     for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
-                         videoPlayer.audioTracks[i].enabled = (i === state.audioTrack);
-                     }
-                 }
-            };
+            syncAudioTrack(state.videoUrl, state.audioTrack, state.currentTime, state.isPlaying);
 
             if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
                 videoPlayer.currentTime = state.currentTime;
@@ -284,7 +328,8 @@ socket.on('video_changed', (data) => {
         const url = typeof data === 'string' ? data : data.url;
         const trackIndex = typeof data === 'object' && data.audioTrack !== undefined ? data.audioTrack : 0;
 
-        videoPlayer.src = '/stream?url=' + encodeURIComponent(url) + '&track=' + trackIndex;
+        videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
+        syncAudioTrack(url, trackIndex, 0, true);
         videoPlayer.onloadedmetadata = () => {
              if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
                  for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
@@ -307,6 +352,10 @@ socket.on('play', (currentTime) => {
     if (!isAdmin) {
         isSettingState = true;
         videoPlayer.currentTime = currentTime;
+        if (audioPlayer && Math.abs(audioPlayer.currentTime - currentTime) > 3) {
+             // For guest, play syncs might have drift, but we already have seek events for big changes.
+             // We can just rely on the video's 'seeked' and 'play' events which we hooked into.
+        }
         const playPromise = videoPlayer.play();
         if (playPromise !== undefined) {
             playPromise.catch(e => {

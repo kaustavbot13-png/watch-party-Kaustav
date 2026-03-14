@@ -81,6 +81,41 @@ app.get('/stream', async (req, res) => {
   }
 });
 
+app.get('/audio_stream', (req, res) => {
+  const videoUrl = req.query.url;
+  const track = req.query.track || '1';
+  const start = req.query.start || '0';
+
+  if (!videoUrl) {
+    return res.status(400).send("No video URL provided.");
+  }
+
+  res.setHeader('Content-Type', 'audio/webm');
+
+  const command = ffmpeg(videoUrl)
+    .inputOptions([
+        '-ss ' + start
+    ])
+    .outputOptions([
+        '-map 0:a:' + track,
+        '-c:a libopus',
+        '-b:a 128k',
+        '-f webm'
+    ])
+    .on('error', (err) => {
+        console.error('FFmpeg audio stream error:', err.message);
+        if (!res.headersSent) {
+            res.status(500).send("Error streaming audio.");
+        }
+    });
+
+  command.pipe(res);
+
+  req.on('close', () => {
+      command.kill('SIGKILL');
+  });
+});
+
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'EDh2ZaQx6TeU@j';
 
 // Global state
