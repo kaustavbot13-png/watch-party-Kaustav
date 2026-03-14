@@ -138,7 +138,7 @@ function updatePlayerState(state) {
 
     isSettingState = true;
 
-    if (Math.abs(videoPlayer.currentTime - state.currentTime) > 1) {
+    if (Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
         videoPlayer.currentTime = state.currentTime;
     }
 
@@ -165,10 +165,8 @@ function updatePlayerState(state) {
 
 // Socket Events
 socket.on('init_state', (state) => {
-    if (state.videoUrl) {
-        // Only request sync if there's a video playing
-        socket.emit('sync_request');
-    }
+    // Always request sync to get initial state correctly
+    socket.emit('sync_request');
 });
 
 socket.on('sync_state', (state) => {
@@ -182,7 +180,7 @@ socket.on('sync_state', (state) => {
             videoPlayer.src = state.videoUrl;
             videoUrlInput.value = state.videoUrl;
 
-            if (Math.abs(videoPlayer.currentTime - state.currentTime) > 1) {
+            if (Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
                 videoPlayer.currentTime = state.currentTime;
             }
 
@@ -198,7 +196,7 @@ socket.on('sync_state', (state) => {
         } else {
             // Already loaded, just sync time
             isSettingState = true;
-            if (Math.abs(videoPlayer.currentTime - state.currentTime) > 1) {
+            if (Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
                 videoPlayer.currentTime = state.currentTime;
             }
             if (state.isPlaying) {
@@ -282,9 +280,12 @@ playerOverlay.addEventListener('click', (e) => {
     }
 });
 
-// Sync every few seconds for guests just to be sure
+// Sync every few seconds for guests, and update time for admins
 setInterval(() => {
     if (!isAdmin && videoPlayer.getAttribute('src')) {
         socket.emit('sync_request');
+    } else if (isAdmin && !videoPlayer.paused && videoPlayer.getAttribute('src')) {
+        // Admin continually pushes their exact playback time to prevent drift
+        socket.emit('admin_time_update', videoPlayer.currentTime);
     }
-}, 5000);
+}, 2000);
