@@ -9,6 +9,9 @@ const loginError = document.getElementById('login-error');
 const adminControls = document.getElementById('admin-controls');
 const videoUrlInput = document.getElementById('video-url');
 const loadVideoBtn = document.getElementById('load-video-btn');
+const trackSelectionGroup = document.getElementById('track-selection-group');
+const audioTrackSelector = document.getElementById('audio-track-selector');
+const runVideoBtn = document.getElementById('run-video-btn');
 
 const videoPlayer = document.getElementById('video-player');
 const playerOverlay = document.getElementById('player-overlay');
@@ -63,12 +66,56 @@ loadVideoBtn.addEventListener('click', () => {
     if (!isAdmin) return;
     const url = videoUrlInput.value.trim();
     if (url) {
-        socket.emit('set_video', url);
+        loadVideoBtn.disabled = true;
+        loadVideoBtn.textContent = 'Fetching Tracks...';
+
+        socket.emit('fetch_audio_tracks', url, (response) => {
+            loadVideoBtn.disabled = false;
+            loadVideoBtn.textContent = 'Load Video';
+
+            if (response.success && response.tracks && response.tracks.length > 0) {
+                audioTrackSelector.innerHTML = '';
+                response.tracks.forEach(track => {
+                    const option = document.createElement('option');
+                    option.value = track.index;
+                    option.textContent = track.language || `Track ${track.index}`;
+                    if (track.title) option.textContent += ` (${track.title})`;
+                    audioTrackSelector.appendChild(option);
+                });
+            } else {
+                audioTrackSelector.innerHTML = '<option value="0">Default Track</option>';
+            }
+            trackSelectionGroup.classList.remove('hidden');
+        });
+    }
+});
+
+runVideoBtn.addEventListener('click', () => {
+    if (!isAdmin) return;
+    const url = videoUrlInput.value.trim();
+    const trackIndex = parseInt(audioTrackSelector.value) || 0;
+
+    if (url) {
+        socket.emit('set_video', { url, audioTrack: trackIndex });
 
         // Update local admin player immediately
         isSettingState = true;
-        videoPlayer.src = url;
+        videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
         videoPlayer.currentTime = 0;
+
+        // Wait for metadata to load to apply audio track if possible
+        videoPlayer.onloadedmetadata = () => {
+             // In HTML5, audioTracks is not widely supported in all browsers for normal video element
+             // It mostly works with HLS/DASH. For a simple mp4, setting the track is browser-dependent
+             // and often not possible via plain JS on a standard <video> without MSE.
+             // However, if the browser supports it:
+             if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
+                 for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
+                     videoPlayer.audioTracks[i].enabled = (i === trackIndex);
+                 }
+             }
+        };
+
         const playPromise = videoPlayer.play();
         if (playPromise !== undefined) {
             playPromise.catch(e => console.log("Autoplay prevented or unsupported format:", e));
@@ -132,8 +179,18 @@ let autoplayBlocked = false;
 function updatePlayerState(state) {
     // Compare against getAttribute to avoid absolute URL mismatch
     const currentSrc = videoPlayer.getAttribute('src');
-    if (state.videoUrl !== currentSrc && state.videoUrl !== '') {
-        videoPlayer.src = state.videoUrl;
+    const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
+
+    if (proxyUrl !== currentSrc && state.videoUrl !== '') {
+        videoPlayer.src = proxyUrl;
+
+        videoPlayer.onloadedmetadata = () => {
+             if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
+                 for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
+                     videoPlayer.audioTracks[i].enabled = (i === state.audioTrack);
+                 }
+             }
+        };
     }
 
     isSettingState = true;
@@ -175,9 +232,10 @@ socket.on('sync_state', (state) => {
     } else {
         // Handle admin refresh
         const currentSrc = videoPlayer.getAttribute('src');
-        if (state.videoUrl !== currentSrc && state.videoUrl !== '') {
+        const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
+        if (proxyUrl !== currentSrc && state.videoUrl !== '') {
             isSettingState = true;
-            videoPlayer.src = state.videoUrl;
+            videoPlayer.src = proxyUrl;
             videoUrlInput.value = state.videoUrl;
 
             if (Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
@@ -212,9 +270,19 @@ socket.on('sync_state', (state) => {
     }
 });
 
-socket.on('video_changed', (url) => {
+socket.on('video_changed', (data) => {
     if (!isAdmin) {
-        videoPlayer.src = url;
+        const url = typeof data === 'string' ? data : data.url;
+        const trackIndex = typeof data === 'object' && data.audioTrack !== undefined ? data.audioTrack : 0;
+
+        videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
+        videoPlayer.onloadedmetadata = () => {
+             if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
+                 for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
+                     videoPlayer.audioTracks[i].enabled = (i === trackIndex);
+                 }
+             }
+        };
         const playPromise = videoPlayer.play();
         if (playPromise !== undefined) {
             playPromise.catch(e => {
