@@ -100,7 +100,7 @@ runVideoBtn.addEventListener('click', () => {
 
         // Update local admin player immediately
         isSettingState = true;
-        videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
+        videoPlayer.src = '/stream?url=' + encodeURIComponent(url) + '&track=' + trackIndex;
         videoPlayer.currentTime = 0;
 
         // Wait for metadata to load to apply audio track if possible
@@ -179,19 +179,19 @@ let autoplayBlocked = false;
 function updatePlayerState(state) {
     // Compare against getAttribute to avoid absolute URL mismatch
     const currentSrc = videoPlayer.getAttribute('src');
-    const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
+    const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl) + '&track=' + state.audioTrack;
 
     if (proxyUrl !== currentSrc && state.videoUrl !== '') {
         videoPlayer.src = proxyUrl;
-
-        videoPlayer.onloadedmetadata = () => {
-             if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
-                 for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
-                     videoPlayer.audioTracks[i].enabled = (i === state.audioTrack);
-                 }
-             }
-        };
     }
+
+    videoPlayer.onloadedmetadata = () => {
+         if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
+             for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
+                 videoPlayer.audioTracks[i].enabled = (i === state.audioTrack);
+             }
+         }
+    };
 
     isSettingState = true;
 
@@ -233,11 +233,19 @@ socket.on('sync_state', (state) => {
     } else {
         // Handle admin refresh
         const currentSrc = videoPlayer.getAttribute('src');
-        const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
+        const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl) + '&track=' + state.audioTrack;
         if (proxyUrl !== currentSrc && state.videoUrl !== '') {
             isSettingState = true;
             videoPlayer.src = proxyUrl;
             videoUrlInput.value = state.videoUrl;
+
+            videoPlayer.onloadedmetadata = () => {
+                 if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
+                     for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
+                         videoPlayer.audioTracks[i].enabled = (i === state.audioTrack);
+                     }
+                 }
+            };
 
             if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
                 videoPlayer.currentTime = state.currentTime;
@@ -276,7 +284,7 @@ socket.on('video_changed', (data) => {
         const url = typeof data === 'string' ? data : data.url;
         const trackIndex = typeof data === 'object' && data.audioTrack !== undefined ? data.audioTrack : 0;
 
-        videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
+        videoPlayer.src = '/stream?url=' + encodeURIComponent(url) + '&track=' + trackIndex;
         videoPlayer.onloadedmetadata = () => {
              if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
                  for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
