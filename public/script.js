@@ -394,15 +394,11 @@ function updatePlayerState(state) {
         videoPlayer.load();
     }
 
-    // Compare against getAttribute to avoid absolute URL mismatch
-    const currentSrc = videoPlayer.getAttribute('src');
-    const currentAbsoluteSrc = videoPlayer.src;
     const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
 
-    // Some browsers decode or normalize the src attribute, so we check both
-    if (proxyUrl !== currentSrc && (!currentAbsoluteSrc || !currentAbsoluteSrc.endsWith(proxyUrl)) && state.videoUrl !== '') {
+    if (state.videoUrl !== currentVideoUrl && state.videoUrl !== '') {
+        currentVideoUrl = state.videoUrl;
         videoPlayer.src = proxyUrl;
-        // explicitly set attribute so getAttribute('src') works more reliably
         videoPlayer.setAttribute('src', proxyUrl);
 
         // Setup separate audio stream if needed
