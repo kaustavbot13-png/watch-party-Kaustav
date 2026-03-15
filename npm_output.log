@@ -1,8 +1,0 @@
-
-> app@1.0.0 start
-> node server.js
-
-Server listening on port 3000
-A user connected: SF9yp3YS50YSsbc6AAAB
-Admin logged in: SF9yp3YS50YSsbc6AAAB
-User disconnected: SF9yp3YS50YSsbc6AAAB

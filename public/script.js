@@ -274,8 +274,17 @@ videoPlayer.addEventListener('seeked', () => {
     }
 });
 
+let isTransitioningVideo = false;
+
 videoPlayer.addEventListener('ended', () => {
     if (!isAdmin) return;
+
+    if (isTransitioningVideo) {
+        console.log('Ignoring ended event during transition.');
+        return;
+    }
+
+    console.log('Video ended event fired.');
 
     // Find the currently playing item in the playlist
     const items = Array.from(playlistContainer.querySelectorAll('.playlist-item'));
@@ -298,10 +307,20 @@ videoPlayer.addEventListener('ended', () => {
         const nextItem = items[currentIndex + 1];
         const nextRunBtn = nextItem.querySelector('.run-video-btn');
         if (nextRunBtn) {
+            isTransitioningVideo = true;
             // Add a small delay so browser correctly cleans up previous ended state
             // before initiating the new video fetch and play.
+
+            // Wait a bit before triggering the next video to avoid race conditions
+            // where the current 'ended' handler finishes and the next video immediately fires 'ended'
             setTimeout(() => {
+                console.log('Clicking next run button');
                 nextRunBtn.click();
+
+                // Allow some time for the new video to start playing before we allow another 'ended' event
+                setTimeout(() => {
+                    isTransitioningVideo = false;
+                }, 2000);
             }, 500);
         }
     }
