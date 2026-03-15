@@ -35,10 +35,13 @@
             </div>
             <button id="add-link-btn" style="margin-top: 15px;">+ Add Link</button>
             <button id="submit-playlist-btn" style="margin-top: 15px; margin-left: 10px; background-color: #2196F3;">Submit Playlist</button>
+            <button id="full-refresh-btn" style="margin-top: 15px; margin-left: 10px; background-color: #f44336;">Full Server Refresh</button>
             <p>You have control over the player. Actions will sync to all users.</p>
         </div>
 
         <div class="player-container">
+            <div id="no-signal-screen" class="no-signal">NO SIGNAL</div>
+            <div id="watermark" class="watermark hidden">Kaustav TV &copy;</div>
             <video id="video-player" controls preload="auto">
                 Your browser does not support the video tag.
             </video>
@@ -48,6 +51,7 @@
 
         <div class="status">
             <span id="role-status">Viewing as: Guest</span>
+            <button id="guest-play-btn" class="hidden" style="margin-left: 10px; padding: 5px 10px; font-size: 0.9em; background-color: #ff9800;">Play</button>
         </div>
     </div>
 
