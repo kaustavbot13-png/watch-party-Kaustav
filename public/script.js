@@ -27,6 +27,7 @@ let audioPlayer = null;
 let currentTrack = 0;
 let currentVideoUrl = '';
 let currentPlaylistItem = null;
+let ignoreNextSeek = false;
 
 function syncAudioTrack(url, track, startTime, isPlaying) {
     if (track == 0 || !url) {
@@ -162,6 +163,7 @@ function attachPlaylistItemEvents(itemDiv) {
 
             // Update local admin player immediately
             isSettingState = true;
+            ignoreNextSeek = true;
             checkSignalState(url);
             videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
             videoPlayer.currentTime = 0;
@@ -292,6 +294,10 @@ videoPlayer.addEventListener('seeked', () => {
         syncAudioTrack(decodedUrl, currentTrack, videoPlayer.currentTime, !videoPlayer.paused);
     }
     if (isAdmin && !isSettingState) {
+        if (ignoreNextSeek) {
+            ignoreNextSeek = false;
+            if (videoPlayer.currentTime < 1) return; // Ignore the initial seek to 0 when loading a new video
+        }
         socket.emit('seek', videoPlayer.currentTime);
     }
 });
