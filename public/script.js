@@ -28,6 +28,7 @@ let currentTrack = 0;
 let currentVideoUrl = '';
 let currentPlaylistItem = null;
 let ignoreNextSeek = false;
+let transitionTimeoutId = null;
 
 function syncAudioTrack(url, track, startTime, isPlaying) {
     if (track == 0 || !url) {
@@ -157,6 +158,13 @@ function attachPlaylistItemEvents(itemDiv) {
         const trackIndex = parseInt(trackSelector.value) || 0;
 
         if (url) {
+            // Cancel any pending auto-transition
+            if (transitionTimeoutId) {
+                clearTimeout(transitionTimeoutId);
+                transitionTimeoutId = null;
+            }
+            isTransitioningVideo = false;
+
             currentVideoUrl = url;
             currentPlaylistItem = itemDiv;
             socket.emit('set_video', { url, audioTrack: trackIndex });
@@ -336,20 +344,22 @@ videoPlayer.addEventListener('ended', () => {
         const nextRunBtn = nextItem.querySelector('.run-video-btn');
         if (nextRunBtn) {
             isTransitioningVideo = true;
-            // Add a small delay so browser correctly cleans up previous ended state
-            // before initiating the new video fetch and play.
 
-            // Wait a bit before triggering the next video to avoid race conditions
-            // where the current 'ended' handler finishes and the next video immediately fires 'ended'
-            setTimeout(() => {
-                console.log('Clicking next run button');
+            // Clear the server state immediately to show NO SIGNAL for 2 minutes
+            socket.emit('full_refresh');
+
+            // Wait 2 minutes (120000 ms) before triggering the next video
+            transitionTimeoutId = setTimeout(() => {
+                console.log('Clicking next run button after 2 minute delay');
                 nextRunBtn.click();
 
                 // Allow some time for the new video to start playing before we allow another 'ended' event
                 setTimeout(() => {
                     isTransitioningVideo = false;
                 }, 2000);
-            }, 500);
+
+                transitionTimeoutId = null;
+            }, 120000);
         }
     }
 });
