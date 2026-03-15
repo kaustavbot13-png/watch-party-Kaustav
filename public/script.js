@@ -15,6 +15,10 @@ const submitPlaylistBtn = document.getElementById('submit-playlist-btn');
 const videoPlayer = document.getElementById('video-player');
 const playerOverlay = document.getElementById('player-overlay');
 const roleStatus = document.getElementById('role-status');
+const noSignalScreen = document.getElementById('no-signal-screen');
+const watermark = document.getElementById('watermark');
+const guestPlayBtn = document.getElementById('guest-play-btn');
+const fullRefreshBtn = document.getElementById('full-refresh-btn');
 
 // State
 let isAdmin = false;
@@ -52,6 +56,16 @@ function syncAudioTrack(url, track, startTime, isPlaying) {
 }
 
 // Helpers
+function checkSignalState(url) {
+    if (!url || url === '') {
+        noSignalScreen.classList.remove('hidden');
+        watermark.classList.add('hidden');
+    } else {
+        noSignalScreen.classList.add('hidden');
+        watermark.classList.remove('hidden');
+    }
+}
+
 function setGuestMode() {
     isAdmin = false;
     videoPlayer.removeAttribute('controls');
@@ -148,6 +162,7 @@ function attachPlaylistItemEvents(itemDiv) {
 
             // Update local admin player immediately
             isSettingState = true;
+            checkSignalState(url);
             videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
             videoPlayer.currentTime = 0;
             syncAudioTrack(url, trackIndex, 0, true);
@@ -218,6 +233,13 @@ submitPlaylistBtn.addEventListener('click', () => {
         }
     }
 });
+
+if (fullRefreshBtn) {
+    fullRefreshBtn.addEventListener('click', () => {
+        if (!isAdmin) return;
+        socket.emit('full_refresh');
+    });
+}
 
 // Player Event Listeners for Admin -> Server
 videoPlayer.addEventListener('play', () => {
@@ -360,6 +382,12 @@ let autoplayBlocked = false;
 
 // Sync Logic from Server -> Client
 function updatePlayerState(state) {
+    checkSignalState(state.videoUrl);
+    if (state.videoUrl === '') {
+        videoPlayer.removeAttribute('src');
+        videoPlayer.load();
+    }
+
     // Compare against getAttribute to avoid absolute URL mismatch
     const currentSrc = videoPlayer.getAttribute('src');
     const currentAbsoluteSrc = videoPlayer.src;
@@ -398,6 +426,7 @@ function updatePlayerState(state) {
                 autoplayBlocked = true;
                 if (!isAdmin) {
                     roleStatus.textContent = "Tap video to play (Autoplay blocked)";
+                    guestPlayBtn.classList.remove('hidden');
                 }
             });
         }
@@ -422,9 +451,18 @@ socket.on('sync_state', (state) => {
         updatePlayerState(state);
     } else {
         // Handle admin refresh
+        checkSignalState(state.videoUrl);
+        if (state.videoUrl === '') {
+            videoPlayer.removeAttribute('src');
+            videoPlayer.load();
+            currentVideoUrl = '';
+            syncAudioTrack('', 0, 0, false);
+            return;
+        }
         const currentSrc = videoPlayer.getAttribute('src');
+        const currentAbsoluteSrc = videoPlayer.src;
         const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
-        if (proxyUrl !== currentSrc && state.videoUrl !== '') {
+        if (proxyUrl !== currentSrc && (!currentAbsoluteSrc || !currentAbsoluteSrc.endsWith(proxyUrl)) && state.videoUrl !== '') {
             isSettingState = true;
             videoPlayer.src = proxyUrl;
             currentVideoUrl = state.videoUrl;
@@ -474,6 +512,7 @@ socket.on('video_changed', (data) => {
     currentVideoUrl = url;
 
     if (!isAdmin) {
+        checkSignalState(url);
         const trackIndex = typeof data === 'object' && data.audioTrack !== undefined ? data.audioTrack : 0;
 
         videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
@@ -491,6 +530,7 @@ socket.on('video_changed', (data) => {
                 console.log("Autoplay prevented:", e);
                 autoplayBlocked = true;
                 roleStatus.textContent = "Tap video to play (Autoplay blocked)";
+                guestPlayBtn.classList.remove('hidden');
             });
         }
     }
@@ -510,6 +550,7 @@ socket.on('play', (currentTime) => {
                 console.log("Autoplay prevented:", e);
                 autoplayBlocked = true;
                 roleStatus.textContent = "Tap video to play (Autoplay blocked)";
+                guestPlayBtn.classList.remove('hidden');
             });
         }
         setTimeout(() => isSettingState = false, 100);
@@ -533,12 +574,7 @@ socket.on('seek', (currentTime) => {
     }
 });
 
-// Prevent non-admins from clicking to pause if native controls appear somehow
-playerOverlay.addEventListener('click', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-
-    // Allow users to tap to bypass autoplay policies
+function bypassAutoplay() {
     if (autoplayBlocked && !isAdmin) {
         const playPromise = videoPlayer.play();
         if (audioPlayer && currentTrack > 0) {
@@ -548,6 +584,7 @@ playerOverlay.addEventListener('click', (e) => {
             playPromise.then(() => {
                 autoplayBlocked = false;
                 roleStatus.textContent = 'Viewing as: Guest';
+                guestPlayBtn.classList.add('hidden');
                 // Sync to make sure time is right
                 socket.emit('sync_request');
             }).catch(err => {
@@ -555,7 +592,18 @@ playerOverlay.addEventListener('click', (e) => {
             });
         }
     }
+}
+
+// Prevent non-admins from clicking to pause if native controls appear somehow
+playerOverlay.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    bypassAutoplay();
 });
+
+if (guestPlayBtn) {
+    guestPlayBtn.addEventListener('click', bypassAutoplay);
+}
 
 // Sync every few seconds for guests, and update time for admins
 setInterval(() => {

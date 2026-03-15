@@ -211,6 +211,16 @@ io.on('connection', (socket) => {
     playerState.updatedAt = Date.now();
   });
 
+  socket.on('full_refresh', () => {
+    if (!socket.isAdmin) return;
+    playerState.videoUrl = '';
+    playerState.audioTrack = 0;
+    playerState.isPlaying = false;
+    playerState.currentTime = 0;
+    playerState.updatedAt = Date.now();
+    io.emit('sync_state', playerState);
+  });
+
   socket.on('sync_request', () => {
     // Calculate expected current time if playing
     let time = playerState.currentTime;

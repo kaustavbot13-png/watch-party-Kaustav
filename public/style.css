@@ -128,6 +128,48 @@ video::-webkit-media-controls {
     /* For guests, we can hide the controls completely. Admins will get them back via JS */
 }
 
+.no-signal {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: repeating-linear-gradient(
+        0deg,
+        #111 0px,
+        #333 2px,
+        #111 4px
+    );
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    color: #fff;
+    font-size: 2em;
+    font-weight: bold;
+    font-family: monospace;
+    letter-spacing: 5px;
+    text-shadow: 0 0 10px #000;
+    z-index: 5;
+    animation: tv-static 0.5s infinite;
+}
+
+@keyframes tv-static {
+    0% { background-position: 0px 0px; }
+    100% { background-position: 0px 10px; }
+}
+
+.watermark {
+    position: absolute;
+    top: 15px;
+    right: 20px;
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 0.9em;
+    font-weight: bold;
+    pointer-events: none;
+    z-index: 15;
+    text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+}
+
 .status {
     margin-top: 15px;
     font-size: 0.9em;
