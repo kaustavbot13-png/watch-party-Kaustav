@@ -9,6 +9,7 @@ const loginError = document.getElementById('login-error');
 const adminControls = document.getElementById('admin-controls');
 const playlistContainer = document.getElementById('playlist-container');
 const addLinkBtn = document.getElementById('add-link-btn');
+const submitPlaylistBtn = document.getElementById('submit-playlist-btn');
 
 const videoPlayer = document.getElementById('video-player');
 const playerOverlay = document.getElementById('player-overlay');
@@ -191,6 +192,24 @@ addLinkBtn.addEventListener('click', () => {
     attachPlaylistItemEvents(newItemDiv);
 });
 
+submitPlaylistBtn.addEventListener('click', () => {
+    if (!isAdmin) return;
+
+    const items = Array.from(playlistContainer.querySelectorAll('.playlist-item'));
+    for (const item of items) {
+        const urlInput = item.querySelector('.video-url');
+        const url = urlInput.value.trim();
+
+        if (url) {
+            const runBtn = item.querySelector('.run-video-btn');
+            if (runBtn) {
+                runBtn.click();
+                return; // start with the first valid link
+            }
+        }
+    }
+});
+
 // Player Event Listeners for Admin -> Server
 videoPlayer.addEventListener('play', () => {
     if (audioPlayer) audioPlayer.play();
@@ -201,7 +220,8 @@ videoPlayer.addEventListener('play', () => {
 
 videoPlayer.addEventListener('pause', () => {
     if (audioPlayer) audioPlayer.pause();
-    if (isAdmin && !isSettingState) {
+    // Do not broadcast pause if the video has naturally ended or is unloading to avoid interrupting sequential playback
+    if (isAdmin && !isSettingState && !videoPlayer.ended && videoPlayer.readyState > 0) {
         socket.emit('pause', videoPlayer.currentTime);
     }
 });
@@ -269,7 +289,11 @@ videoPlayer.addEventListener('ended', () => {
         const nextItem = items[currentIndex + 1];
         const nextRunBtn = nextItem.querySelector('.run-video-btn');
         if (nextRunBtn) {
-            nextRunBtn.click();
+            // Add a small delay so browser correctly cleans up previous ended state
+            // before initiating the new video fetch and play.
+            setTimeout(() => {
+                nextRunBtn.click();
+            }, 500);
         }
     }
 });
