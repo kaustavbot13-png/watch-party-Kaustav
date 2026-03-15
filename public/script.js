@@ -362,10 +362,14 @@ let autoplayBlocked = false;
 function updatePlayerState(state) {
     // Compare against getAttribute to avoid absolute URL mismatch
     const currentSrc = videoPlayer.getAttribute('src');
+    const currentAbsoluteSrc = videoPlayer.src;
     const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
 
-    if (proxyUrl !== currentSrc && state.videoUrl !== '') {
+    // Some browsers decode or normalize the src attribute, so we check both
+    if (proxyUrl !== currentSrc && (!currentAbsoluteSrc || !currentAbsoluteSrc.endsWith(proxyUrl)) && state.videoUrl !== '') {
         videoPlayer.src = proxyUrl;
+        // explicitly set attribute so getAttribute('src') works more reliably
+        videoPlayer.setAttribute('src', proxyUrl);
 
         // Setup separate audio stream if needed
         syncAudioTrack(state.videoUrl, state.audioTrack, state.currentTime, state.isPlaying);
@@ -557,8 +561,8 @@ playerOverlay.addEventListener('click', (e) => {
 setInterval(() => {
     if (!isAdmin && videoPlayer.getAttribute('src')) {
         socket.emit('sync_request');
-    } else if (isAdmin && !videoPlayer.paused && videoPlayer.getAttribute('src')) {
-        // Admin continually pushes their exact playback time to prevent drift
+    } else if (isAdmin && !videoPlayer.paused && videoPlayer.getAttribute('src') && videoPlayer.readyState >= 3) {
+        // Admin continually pushes their exact playback time to prevent drift, but only if video has actually loaded and is playing (readyState >= 3 prevents pushing 0 repeatedly during transition buffering)
         socket.emit('admin_time_update', videoPlayer.currentTime);
     }
 }, 2000);
