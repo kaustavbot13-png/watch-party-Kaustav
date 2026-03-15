@@ -66,14 +66,48 @@ app.get('/stream', async (req, res) => {
       headers['Content-Range'] = response.headers['content-range'];
     }
 
-    res.writeHead(response.status, headers);
-    response.data.pipe(res);
+    const contentType = response.headers['content-type'] || '';
+    if (contentType.includes('matroska') || contentType.includes('mkv')) {
+      // Browsers often support the underlying codecs of an MKV file (like H.264 or HEVC)
+      // but reject the MKV container itself. We can use FFmpeg to repackage the container
+      // to Matroska with a more browser-friendly mime type, or just change the container to MP4.
+      // Since MP4 requires specific moov atom placement for streaming, we use fragmented MP4.
+      headers['Content-Type'] = 'video/mp4';
+      delete headers['Content-Length']; // Length is unknown during remux
+      res.writeHead(response.status, headers);
 
-    req.on('close', () => {
-      if (response.data && typeof response.data.destroy === 'function') {
-        response.data.destroy();
-      }
-    });
+      const command = ffmpeg(response.data)
+        .outputOptions([
+            '-c copy',     // Copy video and audio codecs (no transcoding, low CPU)
+            '-movflags frag_keyframe+empty_moov', // Required to stream MP4 without a seekable output
+            '-f mp4'       // Output as MP4 container
+        ])
+        .on('error', (err) => {
+            console.error('FFmpeg remux error:', err.message);
+            // Ignore socket closed errors, only log actual failures
+            if (!err.message.includes('Output stream closed')) {
+                if (!res.headersSent) res.status(500).send("Error streaming remuxed video.");
+            }
+        });
+
+      command.pipe(res, { end: true });
+
+      req.on('close', () => {
+        command.kill('SIGKILL');
+        if (response.data && typeof response.data.destroy === 'function') {
+          response.data.destroy();
+        }
+      });
+    } else {
+      res.writeHead(response.status, headers);
+      response.data.pipe(res);
+
+      req.on('close', () => {
+        if (response.data && typeof response.data.destroy === 'function') {
+          response.data.destroy();
+        }
+      });
+    }
   } catch (error) {
     if (error.response) {
       res.status(error.response.status).send(error.message);
