@@ -521,12 +521,23 @@ socket.on('sync_state', (state) => {
 
 socket.on('video_changed', (data) => {
     const url = typeof data === 'string' ? data : data.url;
-    currentVideoUrl = url;
+    const trackIndex = typeof data === 'object' && data.audioTrack !== undefined ? data.audioTrack : 0;
 
-    if (!isAdmin) {
+    if (isAdmin && currentVideoUrl !== url) {
+        // Another admin changed the video or auto-transition fired, update this admin's player!
+        currentVideoUrl = url;
+        isSettingState = true;
+        ignoreNextSeek = true;
         checkSignalState(url);
-        const trackIndex = typeof data === 'object' && data.audioTrack !== undefined ? data.audioTrack : 0;
-
+        videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
+        videoPlayer.currentTime = 0;
+        syncAudioTrack(url, trackIndex, 0, true);
+        const playPromise = videoPlayer.play();
+        if (playPromise !== undefined) playPromise.catch(e => console.log(e));
+        setTimeout(() => isSettingState = false, 100);
+    } else if (!isAdmin) {
+        currentVideoUrl = url;
+        checkSignalState(url);
         videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
         syncAudioTrack(url, trackIndex, 0, true);
         videoPlayer.onloadedmetadata = () => {
@@ -549,13 +560,15 @@ socket.on('video_changed', (data) => {
 });
 
 socket.on('play', (currentTime) => {
-    if (!isAdmin) {
+    if (isAdmin && Math.abs(videoPlayer.currentTime - currentTime) > 3) {
         isSettingState = true;
         videoPlayer.currentTime = currentTime;
-        if (audioPlayer && Math.abs(audioPlayer.currentTime - currentTime) > 3) {
-             // For guest, play syncs might have drift, but we already have seek events for big changes.
-             // We can just rely on the video's 'seeked' and 'play' events which we hooked into.
-        }
+        const playPromise = videoPlayer.play();
+        if (playPromise !== undefined) playPromise.catch(e => console.log(e));
+        setTimeout(() => isSettingState = false, 100);
+    } else if (!isAdmin) {
+        isSettingState = true;
+        videoPlayer.currentTime = currentTime;
         const playPromise = videoPlayer.play();
         if (playPromise !== undefined) {
             playPromise.catch(e => {
@@ -570,7 +583,12 @@ socket.on('play', (currentTime) => {
 });
 
 socket.on('pause', (currentTime) => {
-    if (!isAdmin) {
+    if (isAdmin && Math.abs(videoPlayer.currentTime - currentTime) > 3) {
+        isSettingState = true;
+        videoPlayer.currentTime = currentTime;
+        videoPlayer.pause();
+        setTimeout(() => isSettingState = false, 100);
+    } else if (!isAdmin) {
         isSettingState = true;
         videoPlayer.currentTime = currentTime;
         videoPlayer.pause();
@@ -579,7 +597,11 @@ socket.on('pause', (currentTime) => {
 });
 
 socket.on('seek', (currentTime) => {
-    if (!isAdmin) {
+    if (isAdmin && Math.abs(videoPlayer.currentTime - currentTime) > 3) {
+        isSettingState = true;
+        videoPlayer.currentTime = currentTime;
+        setTimeout(() => isSettingState = false, 100);
+    } else if (!isAdmin) {
         isSettingState = true;
         videoPlayer.currentTime = currentTime;
         setTimeout(() => isSettingState = false, 100);
