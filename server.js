@@ -67,7 +67,12 @@ app.get('/stream', async (req, res) => {
     }
 
     const contentType = response.headers['content-type'] || '';
-    if (contentType.includes('matroska') || contentType.includes('mkv')) {
+    const contentDisposition = response.headers['content-disposition'] || '';
+    const urlLower = videoUrl.toLowerCase();
+
+    if (contentType.includes('matroska') || contentType.includes('mkv') ||
+        contentDisposition.toLowerCase().includes('.mkv') ||
+        urlLower.includes('.mkv')) {
       // Browsers often support the underlying codecs of an MKV file (like H.264 or HEVC)
       // but reject the MKV container itself. We can use FFmpeg to repackage the container
       // to Matroska with a more browser-friendly mime type, or just change the container to MP4.
