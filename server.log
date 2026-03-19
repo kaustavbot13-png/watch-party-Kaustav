@@ -1,0 +1,5 @@
+
+> app@1.0.0 start
+> xvfb-run -a node server.js
+
+Server listening on port 3000

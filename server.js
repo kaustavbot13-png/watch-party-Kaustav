@@ -2,6 +2,9 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const puppeteer = require('puppeteer-core');
+const { PuppeteerScreenRecorder } = require('puppeteer-screen-recorder');
+const { PassThrough } = require('stream');
 const ffmpeg = require('fluent-ffmpeg');
 const ffprobePath = require('@ffprobe-installer/ffprobe').path;
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
@@ -155,6 +158,128 @@ app.get('/audio_stream', (req, res) => {
   req.on('close', () => {
       command.kill('SIGKILL');
   });
+});
+
+let activeBrowser = null;
+let activeStream = null;
+let activePassThroughs = new Set();
+let isBrowserStarting = false;
+
+function broadcastToClients(chunk) {
+    for (const pt of activePassThroughs) {
+        try { pt.write(chunk); } catch (e) {}
+    }
+}
+
+app.get('/browser-stream', async (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.status(400).send("No URL provided.");
+
+  res.setHeader('Content-Type', 'video/mp4');
+
+  if (activeBrowser && !isBrowserStarting) {
+      if (playerState.videoUrl !== url) {
+      } else {
+          activePassThroughs.add(res);
+          req.on('close', () => activePassThroughs.delete(res));
+          return;
+      }
+  }
+
+  let retries = 0;
+  while (isBrowserStarting && retries < 10) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      retries++;
+  }
+  if (activeBrowser) {
+      activePassThroughs.add(res);
+      req.on('close', () => activePassThroughs.delete(res));
+      return;
+  }
+  if (isBrowserStarting) {
+      return res.status(500).send("Browser starting failed.");
+  }
+
+  isBrowserStarting = true;
+
+  try {
+    if (activeBrowser) {
+      if (activeStream) activeStream.destroy();
+      await activeBrowser.close();
+      activeBrowser = null;
+      activeStream = null;
+      for (const pt of activePassThroughs) pt.end();
+      activePassThroughs.clear();
+    }
+
+    activePassThroughs.add(res);
+
+    req.on('close', () => {
+        activePassThroughs.delete(res);
+    });
+
+    const browser = await puppeteer.launch({
+      executablePath: '/usr/bin/google-chrome',
+      defaultViewport: {
+        width: 1280,
+        height: 720,
+      },
+      headless: false,
+      ignoreDefaultArgs: ['--mute-audio', '--hide-scrollbars'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--autoplay-policy=no-user-gesture-required'
+      ]
+    });
+
+    activeBrowser = browser;
+
+    const page = await browser.newPage();
+    await page.goto(url);
+
+    await new Promise(r => setTimeout(r, 2000));
+
+    const passThrough = new PassThrough();
+    activeStream = passThrough;
+
+    // We stream MP4 to passThrough
+    const recorder = new PuppeteerScreenRecorder(page, {
+      followNewTab: false,
+      fps: 25,
+      videoFrame: { width: 1280, height: 720 },
+      recordDurationLimit: 3600
+    });
+
+    await recorder.startStream(passThrough);
+
+    passThrough.on('data', (chunk) => {
+        broadcastToClients(chunk);
+    });
+
+    passThrough.on('end', () => {
+        for (const pt of activePassThroughs) pt.end();
+        activePassThroughs.clear();
+    });
+
+    // Override cleanup to also stop recorder
+    const origClose = req.on.bind(req);
+    req.on('close', async () => {
+        try { await recorder.stop(); } catch(e){}
+    });
+
+    isBrowserStarting = false;
+
+  } catch (err) {
+    isBrowserStarting = false;
+    console.error("Browser stream error:", err);
+    if (!res.headersSent) {
+      res.status(500).send("Error streaming browser.");
+    }
+    for (const pt of activePassThroughs) pt.end();
+    activePassThroughs.clear();
+  }
 });
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'EDh2ZaQx6TeU@j';
