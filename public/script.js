@@ -19,6 +19,7 @@ const noSignalScreen = document.getElementById('no-signal-screen');
 const watermark = document.getElementById('watermark');
 const guestPlayBtn = document.getElementById('guest-play-btn');
 const fullRefreshBtn = document.getElementById('full-refresh-btn');
+const safeExitBtn = document.getElementById('safe-exit-btn');
 
 // State
 let isAdmin = false;
@@ -99,6 +100,22 @@ function setGuestMode() {
     adminControls.classList.add('hidden');
     // Keep sound ON by default for normal track playback.
     videoPlayer.muted = false;
+}
+
+function getLoadedStreamUrl() {
+    const candidates = [videoPlayer.getAttribute('src'), videoPlayer.src].filter(Boolean);
+    for (const candidate of candidates) {
+        try {
+            const parsed = new URL(candidate, window.location.origin);
+            const proxiedUrl = parsed.searchParams.get('url');
+            if (proxiedUrl) {
+                return decodeURIComponent(proxiedUrl);
+            }
+        } catch (e) {
+            // Ignore parsing errors and continue trying fallback candidates.
+        }
+    }
+    return '';
 }
 
 if (secretLoginTrigger) {
@@ -277,6 +294,14 @@ if (fullRefreshBtn) {
     });
 }
 
+if (safeExitBtn) {
+    safeExitBtn.addEventListener('click', () => {
+        socket.emit('admin_logout');
+        setGuestMode();
+        socket.emit('sync_request');
+    });
+}
+
 // Player Event Listeners for Admin -> Server
 videoPlayer.addEventListener('play', () => {
     if (audioPlayer) audioPlayer.play();
@@ -436,12 +461,8 @@ function updatePlayerState(state) {
     }
 
     const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
-    const currentSrcAttr = videoPlayer.getAttribute('src');
-    const currentAbsoluteSrc = videoPlayer.src;
-    const srcMismatch =
-        currentSrcAttr !== proxyUrl &&
-        (!currentAbsoluteSrc || !currentAbsoluteSrc.endsWith(proxyUrl));
-    const shouldReloadSource = state.videoUrl !== '' && (state.videoUrl !== currentVideoUrl || srcMismatch);
+    const loadedUrl = getLoadedStreamUrl();
+    const shouldReloadSource = state.videoUrl !== '' && (state.videoUrl !== currentVideoUrl || loadedUrl !== state.videoUrl);
 
     if (shouldReloadSource) {
         currentVideoUrl = state.videoUrl;
@@ -518,10 +539,9 @@ socket.on('sync_state', (state) => {
             syncAudioTrack('', 0, 0, false);
             return;
         }
-        const currentSrc = videoPlayer.getAttribute('src');
-        const currentAbsoluteSrc = videoPlayer.src;
+        const loadedUrl = getLoadedStreamUrl();
         const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
-        if (proxyUrl !== currentSrc && (!currentAbsoluteSrc || !currentAbsoluteSrc.endsWith(proxyUrl)) && state.videoUrl !== '') {
+        if (loadedUrl !== state.videoUrl && state.videoUrl !== '') {
             isSettingState = true;
             videoPlayer.src = proxyUrl;
             currentVideoUrl = state.videoUrl;

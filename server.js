@@ -373,6 +373,12 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('admin_logout', () => {
+    socket.leave('admins');
+    socket.isAdmin = false;
+    console.log('Admin logged out:', socket.id);
+  });
+
   // Admin controls
   socket.on('fetch_audio_tracks', (url, callback) => {
     if (!socket.isAdmin) return callback({ success: false, message: 'Unauthorized' });
