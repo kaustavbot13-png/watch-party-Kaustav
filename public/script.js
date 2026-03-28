@@ -57,6 +57,27 @@ function syncAudioTrack(url, track, startTime, isPlaying) {
     currentTrack = track;
 }
 
+function ensureGuestAudioPlayback() {
+    if (isAdmin) return;
+
+    if (currentTrack > 0) {
+        if (audioPlayer) {
+            audioPlayer.muted = false;
+            audioPlayer.volume = videoPlayer.volume;
+            const audioPromise = audioPlayer.play();
+            if (audioPromise !== undefined) {
+                audioPromise.catch(e => console.log("Guest audio play blocked", e));
+            }
+        }
+    } else {
+        videoPlayer.muted = false;
+        const playPromise = videoPlayer.play();
+        if (playPromise !== undefined) {
+            playPromise.catch(e => console.log("Guest video play blocked", e));
+        }
+    }
+}
+
 // Helpers
 function checkSignalState(url) {
     if (!url || url === '') {
@@ -408,9 +429,14 @@ function updatePlayerState(state) {
     }
 
     const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
-    const hasLoadedSrc = !!videoPlayer.getAttribute('src');
+    const currentSrcAttr = videoPlayer.getAttribute('src');
+    const currentAbsoluteSrc = videoPlayer.src;
+    const srcMismatch =
+        currentSrcAttr !== proxyUrl &&
+        (!currentAbsoluteSrc || !currentAbsoluteSrc.endsWith(proxyUrl));
+    const shouldReloadSource = state.videoUrl !== '' && (state.videoUrl !== currentVideoUrl || srcMismatch);
 
-    if ((state.videoUrl !== currentVideoUrl || !hasLoadedSrc) && state.videoUrl !== '') {
+    if (shouldReloadSource) {
         currentVideoUrl = state.videoUrl;
         videoPlayer.src = proxyUrl;
         videoPlayer.setAttribute('src', proxyUrl);
@@ -446,6 +472,7 @@ function updatePlayerState(state) {
                 }
             });
         }
+        ensureGuestAudioPlayback();
     } else {
         videoPlayer.pause();
     }
@@ -613,11 +640,9 @@ socket.on('seek', (currentTime) => {
 });
 
 function bypassAutoplay() {
-    if (autoplayBlocked && !isAdmin) {
+    if (!isAdmin) {
+        ensureGuestAudioPlayback();
         const playPromise = videoPlayer.play();
-        if (audioPlayer && currentTrack > 0) {
-            audioPlayer.play().catch(e => console.log("Audio still blocked", e));
-        }
         if (playPromise !== undefined) {
             playPromise.then(() => {
                 autoplayBlocked = false;
