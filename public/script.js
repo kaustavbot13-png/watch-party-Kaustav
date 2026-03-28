@@ -402,11 +402,15 @@ function updatePlayerState(state) {
     if (state.videoUrl === '') {
         videoPlayer.removeAttribute('src');
         videoPlayer.load();
+        currentVideoUrl = '';
+        syncAudioTrack('', 0, 0, false);
+        return;
     }
 
     const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
+    const hasLoadedSrc = !!videoPlayer.getAttribute('src');
 
-    if (state.videoUrl !== currentVideoUrl && state.videoUrl !== '') {
+    if ((state.videoUrl !== currentVideoUrl || !hasLoadedSrc) && state.videoUrl !== '') {
         currentVideoUrl = state.videoUrl;
         videoPlayer.src = proxyUrl;
         videoPlayer.setAttribute('src', proxyUrl);
