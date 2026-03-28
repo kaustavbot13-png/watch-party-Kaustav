@@ -29,6 +29,7 @@ let currentVideoUrl = '';
 let currentPlaylistItem = null;
 let ignoreNextSeek = false;
 let transitionTimeoutId = null;
+let isPageUnloading = false;
 
 function syncAudioTrack(url, track, startTime, isPlaying) {
     if (track == 0 || !url) {
@@ -96,6 +97,8 @@ function setGuestMode() {
     roleStatus.textContent = 'Viewing as: Guest';
     loginSection.classList.add('hidden');
     adminControls.classList.add('hidden');
+    // Keep sound ON by default for normal track playback.
+    videoPlayer.muted = false;
 }
 
 if (secretLoginTrigger) {
@@ -113,6 +116,8 @@ function setAdminMode() {
     roleStatus.textContent = 'Viewing as: Admin';
     loginSection.classList.add('hidden');
     adminControls.classList.remove('hidden');
+    // Keep sound ON by default for normal track playback.
+    videoPlayer.muted = false;
 }
 
 // Initial mode
@@ -283,7 +288,7 @@ videoPlayer.addEventListener('play', () => {
 videoPlayer.addEventListener('pause', () => {
     if (audioPlayer) audioPlayer.pause();
     // Do not broadcast pause if the video has naturally ended or is unloading to avoid interrupting sequential playback
-    if (isAdmin && !isSettingState && !videoPlayer.ended && videoPlayer.readyState > 0) {
+    if (isAdmin && !isSettingState && !videoPlayer.ended && videoPlayer.readyState > 0 && !isPageUnloading) {
         socket.emit('pause', videoPlayer.currentTime);
     }
 });
@@ -667,6 +672,14 @@ playerOverlay.addEventListener('click', (e) => {
 if (guestPlayBtn) {
     guestPlayBtn.addEventListener('click', bypassAutoplay);
 }
+
+window.addEventListener('beforeunload', () => {
+    isPageUnloading = true;
+});
+
+window.addEventListener('pagehide', () => {
+    isPageUnloading = true;
+});
 
 // Sync every few seconds for guests, and update time for admins
 setInterval(() => {
