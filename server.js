@@ -407,6 +407,7 @@ io.on('connection', (socket) => {
     playerState.updatedAt = Date.now();
 
     io.emit('video_changed', { url, audioTrack: track });
+    io.emit('sync_state', playerState);
   });
 
   socket.on('play', (currentTime) => {

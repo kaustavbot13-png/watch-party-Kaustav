@@ -421,6 +421,8 @@ videoPlayer.addEventListener('error', (e) => {
 });
 
 let autoplayBlocked = false;
+const GUEST_RESYNC_THRESHOLD_SECONDS = 0.75;
+const ADMIN_RESYNC_THRESHOLD_SECONDS = 1.5;
 
 // Sync Logic from Server -> Client
 function updatePlayerState(state) {
@@ -460,8 +462,9 @@ function updatePlayerState(state) {
 
     isSettingState = true;
 
+    const driftThreshold = isAdmin ? ADMIN_RESYNC_THRESHOLD_SECONDS : GUEST_RESYNC_THRESHOLD_SECONDS;
     // Only force time update if not seeking, to avoid interrupting buffering
-    if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
+    if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > driftThreshold) {
         videoPlayer.currentTime = state.currentTime;
     }
 
@@ -490,7 +493,15 @@ function updatePlayerState(state) {
 
 // Socket Events
 socket.on('init_state', (state) => {
-    // Always request sync to get initial state correctly
+    // Apply immediately so a refreshed guest quickly restores the running video,
+    // then request an authoritative state with server-side elapsed-time correction.
+    if (!isAdmin) {
+        updatePlayerState(state);
+    }
+    socket.emit('sync_request');
+});
+
+socket.on('connect', () => {
     socket.emit('sync_request');
 });
 
@@ -523,7 +534,7 @@ socket.on('sync_state', (state) => {
 
             syncAudioTrack(state.videoUrl, state.audioTrack, state.currentTime, state.isPlaying);
 
-            if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
+            if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > ADMIN_RESYNC_THRESHOLD_SECONDS) {
                 videoPlayer.currentTime = state.currentTime;
             }
 
@@ -539,7 +550,7 @@ socket.on('sync_state', (state) => {
         } else {
             // Already loaded, just sync time
             isSettingState = true;
-            if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > 3) {
+            if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > ADMIN_RESYNC_THRESHOLD_SECONDS) {
                 videoPlayer.currentTime = state.currentTime;
             }
             if (state.isPlaying) {
@@ -596,7 +607,7 @@ socket.on('video_changed', (data) => {
 });
 
 socket.on('play', (currentTime) => {
-    if (isAdmin && Math.abs(videoPlayer.currentTime - currentTime) > 3) {
+    if (isAdmin && Math.abs(videoPlayer.currentTime - currentTime) > ADMIN_RESYNC_THRESHOLD_SECONDS) {
         isSettingState = true;
         videoPlayer.currentTime = currentTime;
         const playPromise = videoPlayer.play();
@@ -604,7 +615,9 @@ socket.on('play', (currentTime) => {
         setTimeout(() => isSettingState = false, 100);
     } else if (!isAdmin) {
         isSettingState = true;
-        videoPlayer.currentTime = currentTime;
+        if (Math.abs(videoPlayer.currentTime - currentTime) > GUEST_RESYNC_THRESHOLD_SECONDS) {
+            videoPlayer.currentTime = currentTime;
+        }
         const playPromise = videoPlayer.play();
         if (playPromise !== undefined) {
             playPromise.catch(e => {
@@ -619,27 +632,31 @@ socket.on('play', (currentTime) => {
 });
 
 socket.on('pause', (currentTime) => {
-    if (isAdmin && Math.abs(videoPlayer.currentTime - currentTime) > 3) {
+    if (isAdmin && Math.abs(videoPlayer.currentTime - currentTime) > ADMIN_RESYNC_THRESHOLD_SECONDS) {
         isSettingState = true;
         videoPlayer.currentTime = currentTime;
         videoPlayer.pause();
         setTimeout(() => isSettingState = false, 100);
     } else if (!isAdmin) {
         isSettingState = true;
-        videoPlayer.currentTime = currentTime;
+        if (Math.abs(videoPlayer.currentTime - currentTime) > GUEST_RESYNC_THRESHOLD_SECONDS) {
+            videoPlayer.currentTime = currentTime;
+        }
         videoPlayer.pause();
         setTimeout(() => isSettingState = false, 100);
     }
 });
 
 socket.on('seek', (currentTime) => {
-    if (isAdmin && Math.abs(videoPlayer.currentTime - currentTime) > 3) {
+    if (isAdmin && Math.abs(videoPlayer.currentTime - currentTime) > ADMIN_RESYNC_THRESHOLD_SECONDS) {
         isSettingState = true;
         videoPlayer.currentTime = currentTime;
         setTimeout(() => isSettingState = false, 100);
     } else if (!isAdmin) {
         isSettingState = true;
-        videoPlayer.currentTime = currentTime;
+        if (Math.abs(videoPlayer.currentTime - currentTime) > GUEST_RESYNC_THRESHOLD_SECONDS) {
+            videoPlayer.currentTime = currentTime;
+        }
         setTimeout(() => isSettingState = false, 100);
     }
 });
