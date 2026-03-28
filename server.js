@@ -36,6 +36,17 @@ app.use(cors());
 const path = require('path');
 app.use(express.static(path.join(__dirname, 'public')));
 
+function isLikelyBrowserSafeType(contentType = '') {
+  const type = contentType.toLowerCase();
+  return (
+    type.includes('video/mp4') ||
+    type.includes('video/webm') ||
+    type.includes('video/ogg') ||
+    type.includes('application/vnd.apple.mpegurl') ||
+    type.includes('application/x-mpegurl')
+  );
+}
+
 app.get('/stream', async (req, res) => {
   const videoUrl = req.query.url;
   const range = req.headers.range;
@@ -45,16 +56,30 @@ app.get('/stream', async (req, res) => {
   }
 
   try {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(videoUrl);
+    } catch (e) {
+      return res.status(400).send("Invalid video URL.");
+    }
+
     const options = {
       method: 'GET',
       url: videoUrl,
       responseType: 'stream',
+      timeout: 20000,
+      maxRedirects: 10,
+      decompress: false,
       headers: {}
     };
 
     if (range) {
       options.headers['Range'] = range;
     }
+    options.headers['User-Agent'] = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+    options.headers['Accept'] = '*/*';
+    options.headers['Referer'] = `${parsedUrl.protocol}//${parsedUrl.host}/`;
+    options.headers['Origin'] = `${parsedUrl.protocol}//${parsedUrl.host}`;
 
     const response = await axios(options);
 
@@ -72,10 +97,20 @@ app.get('/stream', async (req, res) => {
     const contentType = response.headers['content-type'] || '';
     const contentDisposition = response.headers['content-disposition'] || '';
     const urlLower = videoUrl.toLowerCase();
+    let shouldRemux =
+      contentType.includes('matroska') ||
+      contentType.includes('mkv') ||
+      contentDisposition.toLowerCase().includes('.mkv') ||
+      urlLower.includes('.mkv');
 
-    if (contentType.includes('matroska') || contentType.includes('mkv') ||
-        contentDisposition.toLowerCase().includes('.mkv') ||
-        urlLower.includes('.mkv')) {
+    // If mime-type is generic/unknown, prefer remuxing to fragmented MP4.
+    // This avoids browser SRC_NOT_SUPPORTED errors on hidden MKV containers
+    // and removes ffprobe latency from request path.
+    if (!shouldRemux && !isLikelyBrowserSafeType(contentType)) {
+      shouldRemux = true;
+    }
+
+    if (shouldRemux) {
       // Browsers often support the underlying codecs of an MKV file (like H.264 or HEVC)
       // but reject the MKV container itself. We can use FFmpeg to repackage the container
       // to Matroska with a more browser-friendly mime type, or just change the container to MP4.
@@ -117,7 +152,9 @@ app.get('/stream', async (req, res) => {
       });
     }
   } catch (error) {
-    if (error.response) {
+    if (error.code === 'ECONNABORTED') {
+      res.status(504).send("Upstream video server timed out.");
+    } else if (error.response) {
       res.status(error.response.status).send(error.message);
     } else {
       res.status(500).send("Error fetching video stream.");
