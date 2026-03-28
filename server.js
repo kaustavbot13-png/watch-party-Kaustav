@@ -282,7 +282,7 @@ app.get('/browser-stream', async (req, res) => {
   }
 });
 
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'EDh2ZaQx6TeU@j';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '123';
 
 // Global state
 let playerState = {
