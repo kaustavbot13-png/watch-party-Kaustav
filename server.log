@@ -1,5 +1,4 @@
-
-> app@1.0.0 start
-> xvfb-run -a node server.js
-
 Server listening on port 3000
+A user connected: k5nQb_QCzmPBAWWqAAAB
+Admin logged in: k5nQb_QCzmPBAWWqAAAB
+User disconnected: k5nQb_QCzmPBAWWqAAAB

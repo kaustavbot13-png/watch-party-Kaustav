@@ -478,14 +478,13 @@ function updatePlayerState(state) {
         return;
     }
 
-    const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
-    const loadedUrl = normalizeComparableUrl(getLoadedStreamUrl());
     const stateUrl = normalizeComparableUrl(state.videoUrl);
     const currentUrl = normalizeComparableUrl(currentVideoUrl);
-    const shouldReloadSource = state.videoUrl !== '' && (stateUrl !== currentUrl || loadedUrl !== stateUrl);
+    const shouldReloadSource = state.videoUrl !== '' && stateUrl !== currentUrl;
 
     if (shouldReloadSource) {
         currentVideoUrl = state.videoUrl;
+        const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
         videoPlayer.src = proxyUrl;
         videoPlayer.setAttribute('src', proxyUrl);
         videoPlayer.load();
@@ -500,6 +499,8 @@ function updatePlayerState(state) {
                  }
              }
         };
+    } else if (state.videoUrl !== '' && state.audioTrack !== currentTrack) {
+        syncAudioTrack(state.videoUrl, state.audioTrack, state.currentTime, state.isPlaying);
     }
 
     isSettingState = true;
@@ -560,10 +561,13 @@ socket.on('sync_state', (state) => {
             syncAudioTrack('', 0, 0, false);
             return;
         }
-        const loadedUrl = getLoadedStreamUrl();
-        const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
-        if (loadedUrl !== state.videoUrl && state.videoUrl !== '') {
+
+        const stateUrl = normalizeComparableUrl(state.videoUrl);
+        const currentUrl = normalizeComparableUrl(currentVideoUrl);
+
+        if (stateUrl !== currentUrl && state.videoUrl !== '') {
             isSettingState = true;
+            const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
             videoPlayer.src = proxyUrl;
             currentVideoUrl = state.videoUrl;
 
@@ -589,8 +593,13 @@ socket.on('sync_state', (state) => {
             }
             setTimeout(() => isSettingState = false, 100);
         } else {
-            // Already loaded, just sync time
+            // Already loaded, just sync time and track
             isSettingState = true;
+
+            if (state.videoUrl !== '' && state.audioTrack !== currentTrack) {
+                syncAudioTrack(state.videoUrl, state.audioTrack, state.currentTime, state.isPlaying);
+            }
+
             if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > ADMIN_RESYNC_THRESHOLD_SECONDS) {
                 videoPlayer.currentTime = state.currentTime;
             }
