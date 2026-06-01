@@ -174,8 +174,13 @@ video::-webkit-media-controls {
     margin-top: 15px;
     font-size: 0.9em;
     color: #aaa;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 15px;
 }
 
 #role-status {
     font-weight: bold;
+    color: #4CAF50;
 }
