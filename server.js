@@ -12,14 +12,24 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 // Fallback to system ffprobe/ffmpeg if installer fails (e.g. SIGSEGV on some systems)
 try {
   const { execSync } = require('child_process');
-  const sysFfprobe = execSync('which ffprobe').toString().trim();
-  if (sysFfprobe) ffmpeg.setFfprobePath(sysFfprobe);
-  else ffmpeg.setFfprobePath(ffprobePath);
+  let sysFfprobe = '';
+  try { sysFfprobe = execSync('which ffprobe').toString().trim(); } catch(e) {}
+  if (sysFfprobe) {
+    ffmpeg.setFfprobePath(sysFfprobe);
+  } else {
+    ffmpeg.setFfprobePath(ffprobePath);
+  }
 
-  const sysFfmpeg = execSync('which ffmpeg').toString().trim();
-  if (sysFfmpeg) ffmpeg.setFfmpegPath(sysFfmpeg);
+  let sysFfmpeg = '';
+  try { sysFfmpeg = execSync('which ffmpeg').toString().trim(); } catch(e) {}
+  if (sysFfmpeg) {
+    ffmpeg.setFfmpegPath(sysFfmpeg);
+  } else {
+    ffmpeg.setFfmpegPath(ffmpegPath);
+  }
 } catch (e) {
   ffmpeg.setFfprobePath(ffprobePath);
+  ffmpeg.setFfmpegPath(ffmpegPath);
 }
 const axios = require('axios');
 
@@ -59,6 +69,7 @@ function isLikelyHtmlPage(contentType = '') {
 
 app.get('/stream', async (req, res) => {
   const videoUrl = req.query.url;
+  const startTime = req.query.start || 0;
   const clientRange = req.headers.range;
 
   if (!videoUrl) {
@@ -73,87 +84,72 @@ app.get('/stream', async (req, res) => {
       return res.status(400).send("Invalid video URL.");
     }
 
-    const baseHeaders = {
-      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': '*/*',
-      'Referer': `${parsedUrl.protocol}//${parsedUrl.host}/`,
-      'Origin': `${parsedUrl.protocol}//${parsedUrl.host}`
-    };
+    const userAgent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+    const referer = `${parsedUrl.protocol}//${parsedUrl.host}/`;
 
-    const requestStream = async (rangeHeader) => {
-      const options = {
-        method: 'GET',
+    // 1. Initial check to see if we need to remux or if it's an HTML page
+    let probeResponse;
+    try {
+      probeResponse = await axios({
+        method: 'HEAD',
         url: videoUrl,
-        responseType: 'stream',
-        timeout: 20000,
-        maxRedirects: 10,
-        decompress: false,
-        headers: { ...baseHeaders }
-      };
-      if (rangeHeader) {
-        options.headers['Range'] = rangeHeader;
+        headers: { 'User-Agent': userAgent, 'Referer': referer },
+        timeout: 10000,
+        maxRedirects: 10
+      });
+    } catch (err) {
+      try {
+        // Fallback to GET if HEAD fails
+        probeResponse = await axios({
+          method: 'GET',
+          url: videoUrl,
+          headers: { 'User-Agent': userAgent, 'Referer': referer, 'Range': 'bytes=0-0' },
+          timeout: 10000,
+          maxRedirects: 10
+        });
+      } catch (innerErr) {
+        return res.status(500).send("Could not reach the video server: " + innerErr.message);
       }
-      return axios(options);
-    };
+    }
 
-    let response = await requestStream(clientRange);
-
-    const contentType = response.headers['content-type'] || '';
-    const contentDisposition = response.headers['content-disposition'] || '';
+    const contentType = probeResponse.headers['content-type'] || '';
+    const contentDisposition = probeResponse.headers['content-disposition'] || '';
     const urlLower = videoUrl.toLowerCase();
 
     if (isLikelyHtmlPage(contentType) && !isLikelyDirectVideoUrl(videoUrl)) {
-      if (response.data && typeof response.data.destroy === 'function') {
-        response.data.destroy();
-      }
-      return res.status(400).send("The URL points to an HTML page, not a direct video file. Use a direct .mp4/.webm/.m3u8 link.");
+      return res.status(400).send("The URL points to an HTML page, not a direct video file.");
     }
 
     let shouldRemux =
       contentType.includes('matroska') ||
       contentType.includes('mkv') ||
       contentDisposition.toLowerCase().includes('.mkv') ||
-      urlLower.includes('.mkv');
-
-    if (!shouldRemux && !isLikelyBrowserSafeType(contentType)) {
-      shouldRemux = true;
-    }
-
-    const passThroughHeaders = {
-      'Content-Type': response.headers['content-type'] || 'video/mp4',
-      'Accept-Ranges': 'bytes',
-      'Cache-Control': 'public, max-age=3600',
-    };
-
-    if (response.headers['content-length']) {
-      passThroughHeaders['Content-Length'] = response.headers['content-length'];
-    }
-    if (response.headers['content-range']) {
-      passThroughHeaders['Content-Range'] = response.headers['content-range'];
-    }
+      urlLower.includes('.mkv') ||
+      !isLikelyBrowserSafeType(contentType) ||
+      startTime > 0;
 
     if (shouldRemux) {
-      // If we're remuxing, we should still try to handle ranges if possible, 
-      // but for a stream, we'll just provide the full content and let the browser buffer.
-      const remuxHeaders = {
+      // When remuxing or seeking, we use FFmpeg to fetch and process.
+      // We don't send Content-Length because the output size is unknown.
+      res.writeHead(200, {
         'Content-Type': 'video/mp4',
-        'Accept-Ranges': 'bytes',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive'
-      };
+      });
 
-      if (response.headers['content-length']) {
-        remuxHeaders['Content-Length'] = response.headers['content-length'];
-      }
+      const ffmpegHeaders = `User-Agent: ${userAgent}\r\nReferer: ${referer}\r\n`;
 
-      res.writeHead(clientRange ? 206 : 200, remuxHeaders);
-
-      const command = ffmpeg(response.data)
+      const command = ffmpeg()
+        .input(videoUrl)
+        .inputOptions([
+          `-headers ${ffmpegHeaders}`,
+          `-ss ${startTime}`
+        ])
         .outputOptions([
-          '-c copy',
-          '-movflags frag_keyframe+empty_moov+faststart', // Added faststart for quicker playback
-          '-f mp4',
-          '-metadata:s:v:0 duration=0' // Hint to browser to look for duration
+          '-c:v copy',
+          '-c:a aac', // Transcode audio to AAC for better compatibility
+          '-movflags frag_keyframe+empty_moov+faststart',
+          '-f mp4'
         ])
         .on('error', (err) => {
           if (!err.message.includes('Output stream closed') && !res.headersSent) {
@@ -165,16 +161,36 @@ app.get('/stream', async (req, res) => {
 
       req.on('close', () => {
         command.kill('SIGKILL');
-        if (response.data && typeof response.data.destroy === 'function') {
-          response.data.destroy();
-        }
       });
     } else {
-      // Ensure proper headers for direct streaming
-      if (!passThroughHeaders['Content-Type']) {
-        passThroughHeaders['Content-Type'] = 'video/mp4';
+      // Direct proxy for browser-safe formats without seeking
+      const response = await axios({
+        method: 'GET',
+        url: videoUrl,
+        responseType: 'stream',
+        headers: {
+          'User-Agent': userAgent,
+          'Referer': referer,
+          'Range': clientRange
+        },
+        timeout: 20000,
+        maxRedirects: 10
+      });
+
+      const passThroughHeaders = {
+        'Content-Type': response.headers['content-type'] || 'video/mp4',
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'public, max-age=3600',
+        'Connection': 'keep-alive'
+      };
+
+      if (response.headers['content-length']) {
+        passThroughHeaders['Content-Length'] = response.headers['content-length'];
       }
-      passThroughHeaders['Connection'] = 'keep-alive';
+      if (response.headers['content-range']) {
+        passThroughHeaders['Content-Range'] = response.headers['content-range'];
+      }
+
       res.writeHead(response.status, passThroughHeaders);
       response.data.pipe(res);
 
@@ -204,10 +220,23 @@ app.get('/audio_stream', (req, res) => {
     return res.status(400).send("No video URL provided.");
   }
 
-  res.setHeader('Content-Type', 'audio/webm');
+  res.setHeader('Content-Type', 'audio/aac');
 
-  const command = ffmpeg(videoUrl)
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(videoUrl);
+  } catch (e) {
+    return res.status(400).send("Invalid video URL.");
+  }
+
+  const userAgent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+  const referer = `${parsedUrl.protocol}//${parsedUrl.host}/`;
+  const ffmpegHeaders = `User-Agent: ${userAgent}\r\nReferer: ${referer}\r\n`;
+
+  const command = ffmpeg()
+    .input(videoUrl)
     .inputOptions([
+        `-headers ${ffmpegHeaders}`,
         '-ss ' + start
     ])
     .outputOptions([
@@ -217,9 +246,8 @@ app.get('/audio_stream', (req, res) => {
         '-f adts'
     ])
     .on('error', (err) => {
-        console.error('FFmpeg audio stream error:', err.message);
-        if (!res.headersSent) {
-            res.status(500).send("Error streaming audio.");
+        if (!err.message.includes('Output stream closed') && !res.headersSent) {
+            console.error('FFmpeg audio stream error:', err.message);
         }
     });
 

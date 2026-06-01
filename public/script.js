@@ -446,7 +446,6 @@ let autoplayBlocked = false;
 function updatePlayerStateGuest(state) {
     checkSignalState(state.videoUrl);
     
-    // If no video, clear everything
     if (state.videoUrl === '') {
         videoPlayer.removeAttribute('src');
         videoPlayer.load();
@@ -455,18 +454,34 @@ function updatePlayerStateGuest(state) {
         return;
     }
 
-    // Check if URL changed - ONLY reload if URL actually changed
-    const loadedUrl = normalizeComparableUrl(getLoadedStreamUrl());
-    const stateUrl = normalizeComparableUrl(state.videoUrl);
-    const urlChanged = loadedUrl !== stateUrl;
+    const loadedUrlWithParams = videoPlayer.getAttribute('src') || '';
+    const stateUrl = state.videoUrl;
 
-    if (urlChanged) {
-        currentVideoUrl = state.videoUrl;
-        const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
+    // Extract base URL and start time from current src
+    let currentBaseUrl = '';
+    let currentStart = 0;
+    if (loadedUrlWithParams.startsWith('/stream?url=')) {
+        try {
+            const urlObj = new URL(window.location.origin + loadedUrlWithParams);
+            currentBaseUrl = urlObj.searchParams.get('url') || '';
+            currentStart = parseFloat(urlObj.searchParams.get('start')) || 0;
+        } catch(e) {}
+    }
+
+    const urlChanged = normalizeComparableUrl(currentBaseUrl) !== normalizeComparableUrl(stateUrl);
+    const timeDrift = Math.abs((videoPlayer.currentTime + currentStart) - state.currentTime);
+    const needsSeek = timeDrift > 3.0; // Increased threshold for stability
+
+    if (urlChanged || (needsSeek && !videoPlayer.seeking)) {
+        currentVideoUrl = stateUrl;
+        // Use the new 'start' parameter for seeking instead of videoPlayer.currentTime
+        // this avoids browser-side seeking issues on proxied streams.
+        const proxyUrl = `/stream?url=${encodeURIComponent(stateUrl)}&start=${state.currentTime}`;
         
+        isSettingState = true;
         videoPlayer.src = proxyUrl;
         videoPlayer.load();
-        syncAudioTrack(state.videoUrl, state.audioTrack, state.currentTime, state.isPlaying);
+        syncAudioTrack(stateUrl, state.audioTrack, state.currentTime, state.isPlaying);
         
         videoPlayer.onloadedmetadata = () => {
             if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
@@ -475,15 +490,10 @@ function updatePlayerStateGuest(state) {
                 }
             }
         };
+        setTimeout(() => { isSettingState = false; }, 500);
     }
 
     isSettingState = true;
-
-    // Sync playback time for guests - allow seeking to match admin's position
-    // This ensures everyone watches the same part of the video
-    if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > 1.5) {
-        videoPlayer.currentTime = state.currentTime;
-    }
 
     // Sync play/pause state
     const currentPlayState = !videoPlayer.paused;
@@ -590,7 +600,7 @@ socket.on('video_changed', (data) => {
     const url = typeof data === 'string' ? data : data.url;
     const trackIndex = typeof data === 'object' && data.audioTrack !== undefined ? data.audioTrack : 0;
 
-    if (isAdmin && currentVideoUrl !== url) {
+    if (isAdmin && normalizeComparableUrl(currentVideoUrl) !== normalizeComparableUrl(url)) {
         currentVideoUrl = url;
         isSettingState = true;
         ignoreNextSeek = true;
@@ -602,40 +612,9 @@ socket.on('video_changed', (data) => {
         const playPromise = videoPlayer.play();
         if (playPromise !== undefined) playPromise.catch(e => console.log(e));
         setTimeout(() => isSettingState = false, 100);
-    } else if (!isAdmin) {
-        // For guests: only reload if URL is different
-        const loadedUrl = normalizeComparableUrl(getLoadedStreamUrl());
-        const newUrl = normalizeComparableUrl(url);
-        
-        if (loadedUrl !== newUrl) {
-            currentVideoUrl = url;
-            checkSignalState(url);
-            const streamUrl = '/stream?url=' + encodeURIComponent(url);
-            videoPlayer.src = streamUrl;
-            // No .load() call here to avoid double loading
-            syncAudioTrack(url, trackIndex, 0, true);
-            
-            videoPlayer.onloadedmetadata = () => {
-                 if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
-                     for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
-                         videoPlayer.audioTracks[i].enabled = (i === trackIndex);
-                     }
-                 }
-            };
-        }
-        
-        // Only play if currently paused
-        if (videoPlayer.paused) {
-            const playPromise = videoPlayer.play();
-            if (playPromise !== undefined) {
-                playPromise.catch(e => {
-                    console.log("Autoplay prevented:", e);
-                    autoplayBlocked = true;
-                    roleStatus.textContent = "Tap video to play (Autoplay blocked)";
-                    guestPlayBtn.classList.remove('hidden');
-                });
-            }
-        }
+    } else {
+        // For guests, we rely on the periodic sync_request to update state accurately
+        socket.emit('sync_request');
     }
 });
 
@@ -647,20 +626,7 @@ socket.on('play', (currentTime) => {
         if (playPromise !== undefined) playPromise.catch(e => console.log(e));
         setTimeout(() => isSettingState = false, 100);
     } else if (!isAdmin) {
-        // Guest: NO SEEKING - just play if paused
-        isSettingState = true;
-        if (videoPlayer.paused) {
-            const playPromise = videoPlayer.play();
-            if (playPromise !== undefined) {
-                playPromise.catch(e => {
-                    console.log("Autoplay prevented:", e);
-                    autoplayBlocked = true;
-                    roleStatus.textContent = "Tap video to play (Autoplay blocked)";
-                    guestPlayBtn.classList.remove('hidden');
-                });
-            }
-        }
-        setTimeout(() => isSettingState = false, 100);
+        socket.emit('sync_request');
     }
 });
 
@@ -671,10 +637,7 @@ socket.on('pause', (currentTime) => {
         videoPlayer.pause();
         setTimeout(() => isSettingState = false, 100);
     } else if (!isAdmin) {
-        // Guest: NO SEEKING - just pause
-        isSettingState = true;
-        videoPlayer.pause();
-        setTimeout(() => isSettingState = false, 100);
+        socket.emit('sync_request');
     }
 });
 
@@ -683,11 +646,8 @@ socket.on('seek', (currentTime) => {
         isSettingState = true;
         videoPlayer.currentTime = currentTime;
         setTimeout(() => isSettingState = false, 100);
-    } else if (!isAdmin && Math.abs(videoPlayer.currentTime - currentTime) > 1.5) {
-        // Guests now respond to seek events to stay in sync with admin
-        isSettingState = true;
-        videoPlayer.currentTime = currentTime;
-        setTimeout(() => isSettingState = false, 100);
+    } else if (!isAdmin) {
+        socket.emit('sync_request');
     }
 });
 
