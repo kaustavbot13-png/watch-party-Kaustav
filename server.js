@@ -1,475 +1,762 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const cors = require('cors');
-const puppeteer = require('puppeteer-core');
-const { PuppeteerScreenRecorder } = require('puppeteer-screen-recorder');
-const { PassThrough } = require('stream');
-const ffmpeg = require('fluent-ffmpeg');
-const ffprobePath = require('@ffprobe-installer/ffprobe').path;
-const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
-ffmpeg.setFfmpegPath(ffmpegPath);
-// Fallback to system ffprobe/ffmpeg if installer fails (e.g. SIGSEGV on some systems)
-try {
-  const { execSync } = require('child_process');
-  const sysFfprobe = execSync('which ffprobe').toString().trim();
-  if (sysFfprobe) ffmpeg.setFfprobePath(sysFfprobe);
-  else ffmpeg.setFfprobePath(ffprobePath);
+const socket = io();
 
-  const sysFfmpeg = execSync('which ffmpeg').toString().trim();
-  if (sysFfmpeg) ffmpeg.setFfmpegPath(sysFfmpeg);
-} catch (e) {
-  ffmpeg.setFfprobePath(ffprobePath);
+// DOM Elements
+const loginSection = document.getElementById('admin-login-section');
+const passwordInput = document.getElementById('admin-password');
+const loginBtn = document.getElementById('login-btn');
+const loginError = document.getElementById('login-error');
+const secretLoginTrigger = document.getElementById('secret-login-trigger');
+
+const adminControls = document.getElementById('admin-controls');
+const playlistContainer = document.getElementById('playlist-container');
+const addLinkBtn = document.getElementById('add-link-btn');
+const submitPlaylistBtn = document.getElementById('submit-playlist-btn');
+
+const videoPlayer = document.getElementById('video-player');
+const playerOverlay = document.getElementById('player-overlay');
+const roleStatus = document.getElementById('role-status');
+const noSignalScreen = document.getElementById('no-signal-screen');
+const watermark = document.getElementById('watermark');
+const guestPlayBtn = document.getElementById('guest-play-btn');
+const fullRefreshBtn = document.getElementById('full-refresh-btn');
+const safeExitBtn = document.getElementById('safe-exit-btn');
+
+// State
+let isAdmin = false;
+let isSettingState = false;
+let audioPlayer = null;
+let currentTrack = 0;
+let currentVideoUrl = '';
+let currentPlaylistItem = null;
+let ignoreNextSeek = false;
+let transitionTimeoutId = null;
+let isPageUnloading = false;
+
+function syncAudioTrack(url, track, startTime, isPlaying) {
+    if (track == 0 || !url) {
+        if (audioPlayer) {
+            audioPlayer.pause();
+            audioPlayer.removeAttribute('src');
+            audioPlayer = null;
+        }
+        videoPlayer.muted = false;
+    } else {
+        videoPlayer.muted = true;
+        if (!audioPlayer) {
+            audioPlayer = new Audio();
+        }
+        audioPlayer.src = '/audio_stream?url=' + encodeURIComponent(url) + '&track=' + track + '&start=' + startTime;
+        // Let the videoPlayer's 'playing' event handle the audioPlayer.play()
+        // This ensures the audio doesn't start before the video does,
+        // avoiding desync if video takes longer to buffer.
+        if (isPlaying && !videoPlayer.paused && videoPlayer.readyState >= 3) {
+            const playPromise = audioPlayer.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(e => console.log("Audio autoplay prevented", e));
+            }
+        }
+    }
+    currentTrack = track;
 }
-const axios = require('axios');
 
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
-});
+function ensureGuestAudioPlayback() {
+    if (isAdmin) return;
 
-app.use(cors());
-const path = require('path');
-app.use(express.static(path.join(__dirname, 'public')));
-
-function isLikelyBrowserSafeType(contentType = '') {
-  const type = contentType.toLowerCase();
-  return (
-    type.includes('video/mp4') ||
-    type.includes('video/webm') ||
-    type.includes('video/ogg') ||
-    type.includes('video/quicktime') ||
-    type.includes('application/vnd.apple.mpegurl') ||
-    type.includes('application/x-mpegurl')
-  );
+    if (currentTrack > 0) {
+        if (audioPlayer) {
+            audioPlayer.muted = false;
+            audioPlayer.volume = videoPlayer.volume;
+            const audioPromise = audioPlayer.play();
+            if (audioPromise !== undefined) {
+                audioPromise.catch(e => console.log("Guest audio play blocked", e));
+            }
+        }
+    } else {
+        videoPlayer.muted = false;
+        const playPromise = videoPlayer.play();
+        if (playPromise !== undefined) {
+            playPromise.catch(e => console.log("Guest video play blocked", e));
+        }
+    }
 }
 
-function isLikelyDirectVideoUrl(url = '') {
-  const lower = url.toLowerCase();
-  return ['.mp4', '.webm', '.ogg', '.mov', '.m4v', '.mkv', '.m3u8'].some((ext) => lower.includes(ext));
+// Helpers
+function checkSignalState(url) {
+    if (!url || url === '') {
+        noSignalScreen.classList.remove('hidden');
+        watermark.classList.add('hidden');
+    } else {
+        noSignalScreen.classList.add('hidden');
+        watermark.classList.remove('hidden');
+    }
 }
 
-function isLikelyHtmlPage(contentType = '') {
-  return contentType.toLowerCase().includes('text/html');
+function setGuestMode() {
+    isAdmin = false;
+    videoPlayer.removeAttribute('controls');
+    playerOverlay.classList.remove('admin-mode');
+    roleStatus.textContent = 'Viewing as: Guest';
+    loginSection.classList.add('hidden');
+    adminControls.classList.add('hidden');
+    // Keep sound ON by default for normal track playback.
+    videoPlayer.muted = false;
 }
 
-app.get('/stream', async (req, res) => {
-  const videoUrl = req.query.url;
-  const clientRange = req.headers.range;
+function getLoadedStreamUrl() {
+    const candidates = [videoPlayer.getAttribute('src'), videoPlayer.src].filter(Boolean);
+    for (const candidate of candidates) {
+        try {
+            const parsed = new URL(candidate, window.location.origin);
+            const proxiedUrl = parsed.searchParams.get('url');
+            if (proxiedUrl) {
+                return proxiedUrl;
+            }
+        } catch (e) {
+            // Ignore parsing errors and continue trying fallback candidates.
+        }
+    }
+    return '';
+}
 
-  if (!videoUrl) {
-    return res.status(400).send("No video URL provided.");
-  }
-
-  try {
-    let parsedUrl;
+function normalizeComparableUrl(rawUrl) {
+    if (!rawUrl) return '';
     try {
-      parsedUrl = new URL(videoUrl);
+        return new URL(rawUrl).toString();
     } catch (e) {
-      return res.status(400).send("Invalid video URL.");
-    }
-
-    const baseHeaders = {
-      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': '*/*',
-      'Referer': `${parsedUrl.protocol}//${parsedUrl.host}/`,
-      'Origin': `${parsedUrl.protocol}//${parsedUrl.host}`
-    };
-
-    const requestStream = async (rangeHeader) => {
-      const options = {
-        method: 'GET',
-        url: videoUrl,
-        responseType: 'stream',
-        timeout: 20000,
-        maxRedirects: 10,
-        decompress: false,
-        headers: { ...baseHeaders }
-      };
-      if (rangeHeader) {
-        options.headers['Range'] = rangeHeader;
-      }
-      return axios(options);
-    };
-
-    let response = await requestStream(clientRange);
-
-    const contentType = response.headers['content-type'] || '';
-    const contentDisposition = response.headers['content-disposition'] || '';
-    const urlLower = videoUrl.toLowerCase();
-
-    if (isLikelyHtmlPage(contentType) && !isLikelyDirectVideoUrl(videoUrl)) {
-      if (response.data && typeof response.data.destroy === 'function') {
-        response.data.destroy();
-      }
-      return res.status(400).send("The URL points to an HTML page, not a direct video file. Use a direct .mp4/.webm/.m3u8 link.");
-    }
-
-    let shouldRemux =
-      contentType.includes('matroska') ||
-      contentType.includes('mkv') ||
-      contentDisposition.toLowerCase().includes('.mkv') ||
-      urlLower.includes('.mkv');
-
-    if (!shouldRemux && !isLikelyBrowserSafeType(contentType)) {
-      shouldRemux = true;
-    }
-
-    // Never remux a partial byte range. If browser asked for range, fetch full source.
-    if (shouldRemux && clientRange) {
-      if (response.data && typeof response.data.destroy === 'function') {
-        response.data.destroy();
-      }
-      response = await requestStream(null);
-    }
-
-    const passThroughHeaders = {
-      'Content-Length': response.headers['content-length'],
-      'Content-Type': response.headers['content-type'],
-      'Accept-Ranges': response.headers['accept-ranges'] || 'bytes',
-    };
-
-    if (response.headers['content-range']) {
-      passThroughHeaders['Content-Range'] = response.headers['content-range'];
-    }
-
-    if (shouldRemux) {
-      const remuxHeaders = {
-        'Content-Type': 'video/mp4',
-        'Accept-Ranges': 'none',
-        'Cache-Control': 'no-store'
-      };
-
-      res.writeHead(200, remuxHeaders);
-
-      const command = ffmpeg(response.data)
-        .outputOptions([
-          '-c copy',
-          '-movflags frag_keyframe+empty_moov',
-          '-f mp4'
-        ])
-        .on('error', (err) => {
-          console.error('FFmpeg remux error:', err.message);
-          if (!err.message.includes('Output stream closed')) {
-            if (!res.headersSent) res.status(500).send("Error streaming remuxed video.");
-          }
-        });
-
-      command.pipe(res, { end: true });
-
-      req.on('close', () => {
-        command.kill('SIGKILL');
-        if (response.data && typeof response.data.destroy === 'function') {
-          response.data.destroy();
-        }
-      });
-    } else {
-      res.writeHead(response.status, passThroughHeaders);
-      response.data.pipe(res);
-
-      req.on('close', () => {
-        if (response.data && typeof response.data.destroy === 'function') {
-          response.data.destroy();
-        }
-      });
-    }
-  } catch (error) {
-    if (error.code === 'ECONNABORTED') {
-      res.status(504).send("Upstream video server timed out.");
-    } else if (error.response) {
-      res.status(error.response.status).send(error.message);
-    } else {
-      res.status(500).send("Error fetching video stream.");
-    }
-  }
-});
-
-app.get('/audio_stream', (req, res) => {
-  const videoUrl = req.query.url;
-  const track = req.query.track || '1';
-  const start = req.query.start || '0';
-
-  if (!videoUrl) {
-    return res.status(400).send("No video URL provided.");
-  }
-
-  res.setHeader('Content-Type', 'audio/webm');
-
-  const command = ffmpeg(videoUrl)
-    .inputOptions([
-        '-ss ' + start
-    ])
-    .outputOptions([
-        '-map 0:a:' + track,
-        '-c:a aac',
-        '-b:a 128k',
-        '-f adts'
-    ])
-    .on('error', (err) => {
-        console.error('FFmpeg audio stream error:', err.message);
-        if (!res.headersSent) {
-            res.status(500).send("Error streaming audio.");
-        }
-    });
-
-  command.pipe(res);
-
-  req.on('close', () => {
-      command.kill('SIGKILL');
-  });
-});
-
-let activeBrowser = null;
-let activeStream = null;
-let activePassThroughs = new Set();
-let isBrowserStarting = false;
-
-function broadcastToClients(chunk) {
-    for (const pt of activePassThroughs) {
-        try { pt.write(chunk); } catch (e) {}
+        return String(rawUrl).trim();
     }
 }
 
-app.get('/browser-stream', async (req, res) => {
-  const url = req.query.url;
-  if (!url) return res.status(400).send("No URL provided.");
-
-  res.setHeader('Content-Type', 'video/mp4');
-
-  if (activeBrowser && !isBrowserStarting) {
-      if (playerState.videoUrl !== url) {
-      } else {
-          activePassThroughs.add(res);
-          req.on('close', () => activePassThroughs.delete(res));
-          return;
-      }
-  }
-
-  let retries = 0;
-  while (isBrowserStarting && retries < 10) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      retries++;
-  }
-  if (activeBrowser) {
-      activePassThroughs.add(res);
-      req.on('close', () => activePassThroughs.delete(res));
-      return;
-  }
-  if (isBrowserStarting) {
-      return res.status(500).send("Browser starting failed.");
-  }
-
-  isBrowserStarting = true;
-
-  try {
-    if (activeBrowser) {
-      if (activeStream) activeStream.destroy();
-      await activeBrowser.close();
-      activeBrowser = null;
-      activeStream = null;
-      for (const pt of activePassThroughs) pt.end();
-      activePassThroughs.clear();
-    }
-
-    activePassThroughs.add(res);
-
-    req.on('close', () => {
-        activePassThroughs.delete(res);
+if (secretLoginTrigger) {
+    secretLoginTrigger.addEventListener('click', () => {
+        if (!isAdmin) {
+            loginSection.classList.toggle('hidden');
+        }
     });
+}
 
-    const browser = await puppeteer.launch({
-      executablePath: '/usr/bin/google-chrome',
-      defaultViewport: {
-        width: 1280,
-        height: 720,
-      },
-      headless: false,
-      ignoreDefaultArgs: ['--mute-audio', '--hide-scrollbars'],
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--autoplay-policy=no-user-gesture-required'
-      ]
+function setAdminMode() {
+    isAdmin = true;
+    videoPlayer.setAttribute('controls', 'true');
+    playerOverlay.classList.add('admin-mode');
+    roleStatus.textContent = 'Viewing as: Admin';
+    loginSection.classList.add('hidden');
+    adminControls.classList.remove('hidden');
+    // Keep sound ON by default for normal track playback.
+    videoPlayer.muted = false;
+}
+
+// Initial mode
+setGuestMode();
+
+// Login Logic
+loginBtn.addEventListener('click', () => {
+    const password = passwordInput.value;
+    if (!password) return;
+
+    socket.emit('admin_login', password, (response) => {
+        if (response.success) {
+            setAdminMode();
+            loginError.textContent = '';
+
+            // Re-sync video when admin logs in to make sure they have the right state to control
+            socket.emit('sync_request');
+        } else {
+            loginError.textContent = response.message || 'Login failed';
+        }
     });
-
-    activeBrowser = browser;
-
-    const page = await browser.newPage();
-    await page.goto(url);
-
-    await new Promise(r => setTimeout(r, 2000));
-
-    const passThrough = new PassThrough();
-    activeStream = passThrough;
-
-    // We stream MP4 to passThrough
-    const recorder = new PuppeteerScreenRecorder(page, {
-      followNewTab: false,
-      fps: 25,
-      videoFrame: { width: 1280, height: 720 },
-      recordDurationLimit: 3600
-    });
-
-    await recorder.startStream(passThrough);
-
-    passThrough.on('data', (chunk) => {
-        broadcastToClients(chunk);
-    });
-
-    passThrough.on('end', () => {
-        for (const pt of activePassThroughs) pt.end();
-        activePassThroughs.clear();
-    });
-
-    // Override cleanup to also stop recorder
-    const origClose = req.on.bind(req);
-    req.on('close', async () => {
-        try { await recorder.stop(); } catch(e){}
-    });
-
-    isBrowserStarting = false;
-
-  } catch (err) {
-    isBrowserStarting = false;
-    console.error("Browser stream error:", err);
-    if (!res.headersSent) {
-      res.status(500).send("Error streaming browser.");
-    }
-    for (const pt of activePassThroughs) pt.end();
-    activePassThroughs.clear();
-  }
 });
 
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'kkr58';
+// Helper to attach events to a playlist item
+function attachPlaylistItemEvents(itemDiv) {
+    const loadBtn = itemDiv.querySelector('.load-video-btn');
+    const urlInput = itemDiv.querySelector('.video-url');
+    const trackGroup = itemDiv.querySelector('.track-selection-group');
+    const trackSelector = itemDiv.querySelector('.audio-track-selector');
+    const runBtn = itemDiv.querySelector('.run-video-btn');
+    const removeBtn = itemDiv.querySelector('.remove-link-btn');
 
-// Global state
-let playerState = {
-  videoUrl: '',
-  audioTrack: 0,
-  isPlaying: false,
-  currentTime: 0,
-  updatedAt: Date.now()
-};
+    loadBtn.addEventListener('click', () => {
+        if (!isAdmin) return;
+        const url = urlInput.value.trim();
+        if (url) {
+            loadBtn.disabled = true;
+            loadBtn.textContent = 'Fetching...';
 
-io.on('connection', (socket) => {
-  console.log('A user connected:', socket.id);
+            socket.emit('fetch_audio_tracks', url, (response) => {
+                loadBtn.disabled = false;
+                loadBtn.textContent = 'Load';
 
-  // Send current state to newly connected client
-  socket.emit('init_state', playerState);
+                if (response.success && response.tracks && response.tracks.length > 0) {
+                    trackSelector.innerHTML = '';
+                    response.tracks.forEach(track => {
+                        const option = document.createElement('option');
+                        option.value = track.id;
+                        option.textContent = track.language || `Track ${track.id + 1}`;
+                        if (track.title) option.textContent += ` (${track.title})`;
+                        trackSelector.appendChild(option);
+                    });
+                } else {
+                    trackSelector.innerHTML = '<option value="0">Default Track</option>';
+                }
+                trackGroup.classList.remove('hidden');
+            });
+        }
+    });
 
-  socket.on('admin_login', (password, callback) => {
-    if (password === ADMIN_PASSWORD) {
-      socket.join('admins');
-      socket.isAdmin = true;
-      console.log('Admin logged in:', socket.id);
-      callback({ success: true });
+    runBtn.addEventListener('click', () => {
+        if (!isAdmin) return;
+        const url = urlInput.value.trim();
+        const trackIndex = parseInt(trackSelector.value) || 0;
+
+        if (url) {
+            // Cancel any pending auto-transition
+            if (transitionTimeoutId) {
+                clearTimeout(transitionTimeoutId);
+                transitionTimeoutId = null;
+            }
+            isTransitioningVideo = false;
+
+            currentVideoUrl = url;
+            currentPlaylistItem = itemDiv;
+            socket.emit('set_video', { url, audioTrack: trackIndex });
+
+            // Update local admin player immediately
+            isSettingState = true;
+            ignoreNextSeek = true;
+            checkSignalState(url);
+            videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
+            videoPlayer.currentTime = 0;
+            syncAudioTrack(url, trackIndex, 0, true);
+
+            // Wait for metadata to load to apply audio track if possible
+            videoPlayer.onloadedmetadata = () => {
+                 if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
+                     for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
+                         videoPlayer.audioTracks[i].enabled = (i === trackIndex);
+                     }
+                 }
+            };
+
+            const playPromise = videoPlayer.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(e => console.log("Autoplay prevented or unsupported format:", e));
+            }
+            setTimeout(() => isSettingState = false, 100);
+        }
+    });
+
+    removeBtn.addEventListener('click', () => {
+        itemDiv.remove();
+    });
+}
+
+// Attach events to the initial playlist item
+const initialItems = playlistContainer.querySelectorAll('.playlist-item');
+initialItems.forEach(attachPlaylistItemEvents);
+
+// Admin Control Logic
+addLinkBtn.addEventListener('click', () => {
+    if (!isAdmin) return;
+
+    const newItemDiv = document.createElement('div');
+    newItemDiv.className = 'playlist-item';
+    newItemDiv.innerHTML = `
+        <div class="control-group">
+            <input type="text" class="video-url" placeholder="Direct Video URL (e.g., .mp4, .webm)">
+            <button class="load-video-btn">Load</button>
+            <button class="remove-link-btn" style="background-color: #ff5252;">Remove</button>
+        </div>
+        <div class="control-group track-selection-group hidden" style="margin-top: 10px;">
+            <select class="audio-track-selector">
+                <option value="0">Default Track</option>
+            </select>
+            <button class="run-video-btn">Run</button>
+        </div>
+    `;
+    playlistContainer.appendChild(newItemDiv);
+    attachPlaylistItemEvents(newItemDiv);
+});
+
+submitPlaylistBtn.addEventListener('click', () => {
+    if (!isAdmin) return;
+
+    const items = Array.from(playlistContainer.querySelectorAll('.playlist-item'));
+    for (const item of items) {
+        const urlInput = item.querySelector('.video-url');
+        const url = urlInput.value.trim();
+
+        if (url) {
+            const runBtn = item.querySelector('.run-video-btn');
+            if (runBtn) {
+                runBtn.click();
+                return; // start with the first valid link
+            }
+        }
+    }
+});
+
+if (fullRefreshBtn) {
+    fullRefreshBtn.addEventListener('click', () => {
+        if (!isAdmin) return;
+        socket.emit('full_refresh');
+    });
+}
+
+if (safeExitBtn) {
+    safeExitBtn.addEventListener('click', () => {
+        if (transitionTimeoutId) {
+            clearTimeout(transitionTimeoutId);
+            transitionTimeoutId = null;
+        }
+        isTransitioningVideo = false;
+        socket.emit('admin_logout');
+        setGuestMode();
+        socket.emit('sync_request');
+        setTimeout(() => {
+            // Ensure newly switched guest state recovers quickly if autoplay was blocked.
+            bypassAutoplay();
+        }, 150);
+    });
+}
+
+// Player Event Listeners for Admin -> Server
+videoPlayer.addEventListener('play', () => {
+    if (audioPlayer) audioPlayer.play();
+    if (isAdmin && !isSettingState) {
+        socket.emit('play', videoPlayer.currentTime);
+    }
+});
+
+videoPlayer.addEventListener('pause', () => {
+    if (audioPlayer) audioPlayer.pause();
+    // Do not broadcast pause if the video has naturally ended or is unloading to avoid interrupting sequential playback
+    if (isAdmin && !isSettingState && !videoPlayer.ended && videoPlayer.readyState > 0 && !isPageUnloading) {
+        socket.emit('pause', videoPlayer.currentTime);
+    }
+});
+
+videoPlayer.addEventListener('waiting', () => {
+    if (audioPlayer) audioPlayer.pause();
+});
+
+videoPlayer.addEventListener('playing', () => {
+    if (audioPlayer) audioPlayer.play();
+});
+
+videoPlayer.addEventListener('volumechange', () => {
+    if (audioPlayer) {
+        audioPlayer.volume = videoPlayer.volume;
+        // Aggressively prevent native video from unmuting if track > 0
+        if (currentTrack > 0 && !videoPlayer.muted) {
+            videoPlayer.muted = true;
+        }
+    }
+});
+
+// Extra safeguard to enforce muting periodically in case browser unmutes it
+setInterval(() => {
+    if (currentTrack > 0 && !videoPlayer.muted) {
+        videoPlayer.muted = true;
+    }
+}, 500);
+
+videoPlayer.addEventListener('seeked', () => {
+    if (audioPlayer) {
+        // Must reload the audio stream from the new start time since it's an ffmpeg stream
+        const url = currentVideoUrl || videoPlayer.getAttribute('src').replace('/stream?url=', ''); // Fallback for guest if needed, but guest doesn't seek natively
+        const decodedUrl = decodeURIComponent(url);
+        // To avoid re-fetching on minor sync drift, only update if difference is noticeable. But this is the native 'seeked' event.
+        // It's fired when admin scrubs the bar or guest receives a big sync update.
+        syncAudioTrack(decodedUrl, currentTrack, videoPlayer.currentTime, !videoPlayer.paused);
+    }
+    if (isAdmin && !isSettingState) {
+        if (ignoreNextSeek) {
+            ignoreNextSeek = false;
+            if (videoPlayer.currentTime < 1) return; // Ignore the initial seek to 0 when loading a new video
+        }
+        socket.emit('seek', videoPlayer.currentTime);
+    }
+});
+
+let isTransitioningVideo = false;
+
+videoPlayer.addEventListener('ended', () => {
+    if (!isAdmin) return;
+
+    if (isTransitioningVideo) {
+        console.log('Ignoring ended event during transition.');
+        return;
+    }
+
+    console.log('Video ended event fired.');
+
+    // Find the currently playing item in the playlist
+    const items = Array.from(playlistContainer.querySelectorAll('.playlist-item'));
+
+    let currentIndex = items.indexOf(currentPlaylistItem);
+
+    // Fallback logic if the exact item ref was lost
+    if (currentIndex === -1) {
+        for (let i = 0; i < items.length; i++) {
+            const inputUrl = items[i].querySelector('.video-url').value.trim();
+            if (inputUrl === currentVideoUrl) {
+                currentIndex = i;
+                break;
+            }
+        }
+    }
+
+    // If there is a next item, run it
+    if (currentIndex !== -1 && currentIndex + 1 < items.length) {
+        const nextItem = items[currentIndex + 1];
+        const nextRunBtn = nextItem.querySelector('.run-video-btn');
+        if (nextRunBtn) {
+            isTransitioningVideo = true;
+
+            // Clear the server state immediately to show NO SIGNAL for 2 minutes
+            socket.emit('full_refresh');
+
+            // Wait 2 minutes (120000 ms) before triggering the next video
+            transitionTimeoutId = setTimeout(() => {
+                console.log('Clicking next run button after 2 minute delay');
+                nextRunBtn.click();
+
+                // Allow some time for the new video to start playing before we allow another 'ended' event
+                setTimeout(() => {
+                    isTransitioningVideo = false;
+                }, 2000);
+
+                transitionTimeoutId = null;
+            }, 120000);
+        }
+    }
+});
+
+// Handle Video Errors
+videoPlayer.addEventListener('error', (e) => {
+    const error = videoPlayer.error;
+    let errorMessage = "Unknown Error";
+    if (error) {
+        switch (error.code) {
+            case error.MEDIA_ERR_ABORTED:
+                errorMessage = "You aborted the video playback.";
+                break;
+            case error.MEDIA_ERR_NETWORK:
+                errorMessage = "A network error caused the video download to fail part-way. The link token might be expired.";
+                break;
+            case error.MEDIA_ERR_DECODE:
+                errorMessage = "The video playback was aborted due to a corruption problem or because the video used features your browser did not support.";
+                break;
+            case error.MEDIA_ERR_SRC_NOT_SUPPORTED:
+                errorMessage = "The video could not be loaded, either because the server or network failed or because the format is not supported (e.g., .mkv files are often not supported natively by browsers). Try an .mp4 link.";
+                break;
+            default:
+                errorMessage = "An unknown error occurred.";
+                break;
+        }
+    }
+
+    if (isAdmin) {
+        alert("Video Error: " + errorMessage);
+    }
+    console.error("Video Error:", errorMessage, e);
+});
+
+let autoplayBlocked = false;
+const GUEST_RESYNC_THRESHOLD_SECONDS = 0.75;
+const ADMIN_RESYNC_THRESHOLD_SECONDS = 1.5;
+
+// Sync Logic from Server -> Client
+function updatePlayerState(state) {
+    checkSignalState(state.videoUrl);
+    if (state.videoUrl === '') {
+        videoPlayer.removeAttribute('src');
+        videoPlayer.load();
+        currentVideoUrl = '';
+        syncAudioTrack('', 0, 0, false);
+        return;
+    }
+
+    const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
+    const loadedUrl = normalizeComparableUrl(getLoadedStreamUrl());
+    const stateUrl = normalizeComparableUrl(state.videoUrl);
+    const currentUrl = normalizeComparableUrl(currentVideoUrl);
+    const shouldReloadSource = state.videoUrl !== '' && (stateUrl !== currentUrl || loadedUrl !== stateUrl);
+
+    if (shouldReloadSource) {
+        currentVideoUrl = state.videoUrl;
+        videoPlayer.src = proxyUrl;
+        videoPlayer.setAttribute('src', proxyUrl);
+        videoPlayer.load();
+
+        // Setup separate audio stream if needed
+        syncAudioTrack(state.videoUrl, state.audioTrack, state.currentTime, state.isPlaying);
+
+        videoPlayer.onloadedmetadata = () => {
+             if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
+                 for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
+                     videoPlayer.audioTracks[i].enabled = (i === state.audioTrack);
+                 }
+             }
+        };
+    }
+
+    isSettingState = true;
+
+    const driftThreshold = isAdmin ? ADMIN_RESYNC_THRESHOLD_SECONDS : GUEST_RESYNC_THRESHOLD_SECONDS;
+    // Only force time update if not seeking, to avoid interrupting buffering
+    if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > driftThreshold) {
+        videoPlayer.currentTime = state.currentTime;
+    }
+
+    if (state.isPlaying) {
+        // Only call play() if the video is not already playing to avoid restart loops
+        if (videoPlayer.paused) {
+            const playPromise = videoPlayer.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(e => {
+                    console.log("Autoplay prevented or interrupted:", e);
+                    autoplayBlocked = true;
+                    if (!isAdmin) {
+                        roleStatus.textContent = "Tap video to play (Autoplay blocked)";
+                        guestPlayBtn.classList.remove('hidden');
+                    }
+                });
+            }
+        }
+        ensureGuestAudioPlayback();
     } else {
-      callback({ success: false, message: 'Invalid password' });
+        videoPlayer.pause();
     }
-  });
 
-  socket.on('admin_logout', () => {
-    socket.leave('admins');
-    socket.isAdmin = false;
-    console.log('Admin logged out:', socket.id);
-  });
+    // Slight delay to re-enable broadcasting after applying remote state
+    setTimeout(() => {
+        isSettingState = false;
+    }, 100);
+}
 
-  // Admin controls
-  socket.on('fetch_audio_tracks', (url, callback) => {
-    if (!socket.isAdmin) return callback({ success: false, message: 'Unauthorized' });
+// Socket Events
+socket.on('init_state', (state) => {
+    // Apply immediately so a refreshed guest quickly restores the running video,
+    // then request an authoritative state with server-side elapsed-time correction.
+    if (!isAdmin) {
+        updatePlayerState(state);
+    }
+    socket.emit('sync_request');
+});
 
-    ffmpeg.ffprobe(url, (err, metadata) => {
-      if (err) {
-        console.error('Error fetching tracks:', err.message);
-        return callback({ success: false, message: 'Could not fetch metadata' });
-      }
+socket.on('connect', () => {
+    socket.emit('sync_request');
+});
 
-      const audioStreams = metadata.streams.filter(s => s.codec_type === 'audio');
-      const tracks = audioStreams.map((stream, index) => ({
-        id: index,
-        index: stream.index,
-        language: stream.tags && stream.tags.language ? stream.tags.language : `Track ${index + 1}`,
-        title: stream.tags && stream.tags.title ? stream.tags.title : null
-      }));
+socket.on('sync_state', (state) => {
+    if (!isAdmin) {
+        updatePlayerState(state);
+    } else {
+        // Handle admin refresh
+        checkSignalState(state.videoUrl);
+        if (state.videoUrl === '') {
+            videoPlayer.removeAttribute('src');
+            videoPlayer.load();
+            currentVideoUrl = '';
+            syncAudioTrack('', 0, 0, false);
+            return;
+        }
+        const loadedUrl = getLoadedStreamUrl();
+        const proxyUrl = '/stream?url=' + encodeURIComponent(state.videoUrl);
+        if (loadedUrl !== state.videoUrl && state.videoUrl !== '') {
+            isSettingState = true;
+            videoPlayer.src = proxyUrl;
+            currentVideoUrl = state.videoUrl;
 
-      callback({ success: true, tracks });
-    });
-  });
+            // Try to update an input if one exists with this URL, or just let it be.
+            const inputs = document.querySelectorAll('.video-url');
+            if (inputs.length > 0 && inputs[0].value === '') {
+                inputs[0].value = state.videoUrl;
+            }
 
-  socket.on('set_video', (data) => {
-    if (!socket.isAdmin) return;
+            syncAudioTrack(state.videoUrl, state.audioTrack, state.currentTime, state.isPlaying);
+
+            if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > ADMIN_RESYNC_THRESHOLD_SECONDS) {
+                videoPlayer.currentTime = state.currentTime;
+            }
+
+            if (state.isPlaying) {
+                const playPromise = videoPlayer.play();
+                if (playPromise !== undefined) {
+                    playPromise.catch(e => console.log("Admin Autoplay prevented:", e));
+                }
+            } else {
+                videoPlayer.pause();
+            }
+            setTimeout(() => isSettingState = false, 100);
+        } else {
+            // Already loaded, just sync time
+            isSettingState = true;
+            if (!videoPlayer.seeking && Math.abs(videoPlayer.currentTime - state.currentTime) > ADMIN_RESYNC_THRESHOLD_SECONDS) {
+                videoPlayer.currentTime = state.currentTime;
+            }
+            if (state.isPlaying) {
+                const playPromise = videoPlayer.play();
+                if (playPromise !== undefined) {
+                    playPromise.catch(e => console.log("Admin Autoplay prevented:", e));
+                }
+            } else {
+                videoPlayer.pause();
+            }
+            setTimeout(() => isSettingState = false, 100);
+        }
+    }
+});
+
+socket.on('video_changed', (data) => {
     const url = typeof data === 'string' ? data : data.url;
-    const track = typeof data === 'object' && data.audioTrack !== undefined ? data.audioTrack : 0;
+    const trackIndex = typeof data === 'object' && data.audioTrack !== undefined ? data.audioTrack : 0;
 
-    playerState.videoUrl = url;
-    playerState.audioTrack = track;
-    playerState.isPlaying = true;
-    playerState.currentTime = 0;
-    playerState.updatedAt = Date.now();
-
-    io.emit('video_changed', { url, audioTrack: track });
-    io.emit('sync_state', playerState);
-  });
-
-  socket.on('play', (currentTime) => {
-    if (!socket.isAdmin) return;
-    playerState.isPlaying = true;
-    playerState.currentTime = currentTime;
-    playerState.updatedAt = Date.now();
-    socket.broadcast.emit('play', currentTime);
-  });
-
-  socket.on('pause', (currentTime) => {
-    if (!socket.isAdmin) return;
-    playerState.isPlaying = false;
-    playerState.currentTime = currentTime;
-    playerState.updatedAt = Date.now();
-    socket.broadcast.emit('pause', currentTime);
-  });
-
-  socket.on('seek', (currentTime) => {
-    if (!socket.isAdmin) return;
-    playerState.currentTime = currentTime;
-    playerState.updatedAt = Date.now();
-    socket.broadcast.emit('seek', currentTime);
-  });
-
-  socket.on('admin_time_update', (currentTime) => {
-    if (!socket.isAdmin) return;
-    playerState.currentTime = currentTime;
-    playerState.updatedAt = Date.now();
-  });
-
-  socket.on('full_refresh', () => {
-    if (!socket.isAdmin) return;
-    playerState.videoUrl = '';
-    playerState.audioTrack = 0;
-    playerState.isPlaying = false;
-    playerState.currentTime = 0;
-    playerState.updatedAt = Date.now();
-    io.emit('sync_state', playerState);
-  });
-
-  socket.on('sync_request', () => {
-    // Calculate expected current time if playing
-    let time = playerState.currentTime;
-    if (playerState.isPlaying) {
-      time += (Date.now() - playerState.updatedAt) / 1000;
+    if (isAdmin && currentVideoUrl !== url) {
+        // Another admin changed the video or auto-transition fired, update this admin's player!
+        currentVideoUrl = url;
+        isSettingState = true;
+        ignoreNextSeek = true;
+        checkSignalState(url);
+        videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
+        videoPlayer.currentTime = 0;
+        syncAudioTrack(url, trackIndex, 0, true);
+        const playPromise = videoPlayer.play();
+        if (playPromise !== undefined) playPromise.catch(e => console.log(e));
+        setTimeout(() => isSettingState = false, 100);
+    } else if (!isAdmin) {
+        // Only reload video if it's different from what's currently loaded
+        const loadedUrl = normalizeComparableUrl(getLoadedStreamUrl());
+        const newUrl = normalizeComparableUrl(url);
+        if (loadedUrl !== newUrl) {
+            currentVideoUrl = url;
+            checkSignalState(url);
+            videoPlayer.src = '/stream?url=' + encodeURIComponent(url);
+            videoPlayer.load();
+            syncAudioTrack(url, trackIndex, 0, true);
+            videoPlayer.onloadedmetadata = () => {
+                 if (videoPlayer.audioTracks && videoPlayer.audioTracks.length > 0) {
+                     for (let i = 0; i < videoPlayer.audioTracks.length; i++) {
+                         videoPlayer.audioTracks[i].enabled = (i === trackIndex);
+                     }
+                 }
+            };
+        }
+        const playPromise = videoPlayer.play();
+        if (playPromise !== undefined) {
+            playPromise.catch(e => {
+                console.log("Autoplay prevented:", e);
+                autoplayBlocked = true;
+                roleStatus.textContent = "Tap video to play (Autoplay blocked)";
+                guestPlayBtn.classList.remove('hidden');
+            });
+        }
     }
-    socket.emit('sync_state', { ...playerState, currentTime: time });
-  });
-
-  socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
-  });
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+socket.on('play', (currentTime) => {
+    if (isAdmin && Math.abs(videoPlayer.currentTime - currentTime) > ADMIN_RESYNC_THRESHOLD_SECONDS) {
+        isSettingState = true;
+        videoPlayer.currentTime = currentTime;
+        const playPromise = videoPlayer.play();
+        if (playPromise !== undefined) playPromise.catch(e => console.log(e));
+        setTimeout(() => isSettingState = false, 100);
+    } else if (!isAdmin) {
+        isSettingState = true;
+        if (Math.abs(videoPlayer.currentTime - currentTime) > GUEST_RESYNC_THRESHOLD_SECONDS) {
+            videoPlayer.currentTime = currentTime;
+        }
+        // Only call play() if the video is not already playing
+        if (videoPlayer.paused) {
+            const playPromise = videoPlayer.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(e => {
+                    console.log("Autoplay prevented:", e);
+                    autoplayBlocked = true;
+                    roleStatus.textContent = "Tap video to play (Autoplay blocked)";
+                    guestPlayBtn.classList.remove('hidden');
+                });
+            }
+        }
+        setTimeout(() => isSettingState = false, 100);
+    }
 });
+
+socket.on('pause', (currentTime) => {
+    if (isAdmin && Math.abs(videoPlayer.currentTime - currentTime) > ADMIN_RESYNC_THRESHOLD_SECONDS) {
+        isSettingState = true;
+        videoPlayer.currentTime = currentTime;
+        videoPlayer.pause();
+        setTimeout(() => isSettingState = false, 100);
+    } else if (!isAdmin) {
+        isSettingState = true;
+        if (Math.abs(videoPlayer.currentTime - currentTime) > GUEST_RESYNC_THRESHOLD_SECONDS) {
+            videoPlayer.currentTime = currentTime;
+        }
+        videoPlayer.pause();
+        setTimeout(() => isSettingState = false, 100);
+    }
+});
+
+socket.on('seek', (currentTime) => {
+    if (isAdmin && Math.abs(videoPlayer.currentTime - currentTime) > ADMIN_RESYNC_THRESHOLD_SECONDS) {
+        isSettingState = true;
+        videoPlayer.currentTime = currentTime;
+        setTimeout(() => isSettingState = false, 100);
+    } else if (!isAdmin) {
+        isSettingState = true;
+        if (Math.abs(videoPlayer.currentTime - currentTime) > GUEST_RESYNC_THRESHOLD_SECONDS) {
+            videoPlayer.currentTime = currentTime;
+        }
+        setTimeout(() => isSettingState = false, 100);
+    }
+});
+
+function bypassAutoplay() {
+    if (!isAdmin) {
+        ensureGuestAudioPlayback();
+        const playPromise = videoPlayer.play();
+        if (playPromise !== undefined) {
+            playPromise.then(() => {
+                autoplayBlocked = false;
+                roleStatus.textContent = 'Viewing as: Guest';
+                guestPlayBtn.classList.add('hidden');
+                // Sync to make sure time is right
+                socket.emit('sync_request');
+            }).catch(err => {
+                console.log("Still blocked", err);
+            });
+        }
+    }
+}
+
+// Prevent non-admins from clicking to pause if native controls appear somehow
+playerOverlay.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    bypassAutoplay();
+});
+
+if (guestPlayBtn) {
+    guestPlayBtn.addEventListener('click', bypassAutoplay);
+}
+
+window.addEventListener('beforeunload', () => {
+    isPageUnloading = true;
+});
+
+window.addEventListener('pagehide', () => {
+    isPageUnloading = true;
+});
+
+// Sync every few seconds for guests, and update time for admins
+setInterval(() => {
+    if (!isAdmin && videoPlayer.getAttribute('src')) {
+        socket.emit('sync_request');
+    } else if (isAdmin && !videoPlayer.paused && videoPlayer.getAttribute('src') && videoPlayer.readyState >= 3) {
+        // Admin continually pushes their exact playback time to prevent drift, but only if video has actually loaded and is playing (readyState >= 3 prevents pushing 0 repeatedly during transition buffering)
+        socket.emit('admin_time_update', videoPlayer.currentTime);
+    }
+}, 2000);
