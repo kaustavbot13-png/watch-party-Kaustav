@@ -141,7 +141,8 @@ app.get('/stream', async (req, res) => {
       const remuxHeaders = {
         'Content-Type': 'video/mp4',
         'Accept-Ranges': 'none',
-        'Cache-Control': 'no-store'
+        'Cache-Control': 'no-store',
+        'Connection': 'keep-alive'
       };
 
       res.writeHead(200, remuxHeaders);
@@ -168,6 +169,11 @@ app.get('/stream', async (req, res) => {
         }
       });
     } else {
+      // Ensure proper headers for direct streaming
+      if (!passThroughHeaders['Content-Type']) {
+        passThroughHeaders['Content-Type'] = 'video/mp4';
+      }
+      passThroughHeaders['Connection'] = 'keep-alive';
       res.writeHead(response.status, passThroughHeaders);
       response.data.pipe(res);
 
