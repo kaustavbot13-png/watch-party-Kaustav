@@ -137,15 +137,34 @@ app.get('/stream', async (req, res) => {
         'Connection': 'keep-alive'
       });
 
-      const ffmpegHeaders = `User-Agent: ${userAgent}\r\nReferer: ${referer}\r\n`;
+      let response;
+      let command;
 
-      const command = ffmpeg()
-        .input(videoUrl)
-        .inputOptions([
-          `-headers ${ffmpegHeaders}`,
-          `-ss ${startTime}`
-        ])
+      req.on('close', () => {
+        if (response && response.data && typeof response.data.destroy === 'function') {
+          response.data.destroy();
+        }
+        if (command && typeof command.kill === 'function') {
+          command.kill('SIGKILL');
+        }
+      });
+
+      response = await axios({
+        method: 'GET',
+        url: videoUrl,
+        responseType: 'stream',
+        headers: {
+          'User-Agent': userAgent,
+          'Referer': referer
+        },
+        timeout: 20000,
+        maxRedirects: 10
+      });
+
+      command = ffmpeg()
+        .input(response.data)
         .outputOptions([
+          `-ss ${startTime}`,
           '-c:v copy',
           '-c:a aac', // Transcode audio to AAC for better compatibility
           '-movflags frag_keyframe+empty_moov+faststart',
@@ -158,10 +177,6 @@ app.get('/stream', async (req, res) => {
         });
 
       command.pipe(res, { end: true });
-
-      req.on('close', () => {
-        command.kill('SIGKILL');
-      });
     } else {
       // Direct proxy for browser-safe formats without seeking
       const response = await axios({
@@ -231,30 +246,51 @@ app.get('/audio_stream', (req, res) => {
 
   const userAgent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
   const referer = `${parsedUrl.protocol}//${parsedUrl.host}/`;
-  const ffmpegHeaders = `User-Agent: ${userAgent}\r\nReferer: ${referer}\r\n`;
 
-  const command = ffmpeg()
-    .input(videoUrl)
-    .inputOptions([
-        `-headers ${ffmpegHeaders}`,
-        '-ss ' + start
-    ])
-    .outputOptions([
-        '-map 0:a:' + track,
-        '-c:a aac',
-        '-b:a 128k',
-        '-f adts'
-    ])
-    .on('error', (err) => {
-        if (!err.message.includes('Output stream closed') && !res.headersSent) {
-            console.error('FFmpeg audio stream error:', err.message);
-        }
-    });
-
-  command.pipe(res);
+  let axiosStream = null;
+  let audioCommand = null;
 
   req.on('close', () => {
-      command.kill('SIGKILL');
+    if (axiosStream && typeof axiosStream.destroy === 'function') {
+      axiosStream.destroy();
+    }
+    if (audioCommand && typeof audioCommand.kill === 'function') {
+      audioCommand.kill('SIGKILL');
+    }
+  });
+
+  axios({
+    method: 'GET',
+    url: videoUrl,
+    responseType: 'stream',
+    headers: {
+      'User-Agent': userAgent,
+      'Referer': referer
+    },
+    timeout: 20000,
+    maxRedirects: 10
+  }).then(response => {
+    axiosStream = response.data;
+    audioCommand = ffmpeg()
+      .input(axiosStream)
+      .outputOptions([
+          '-ss ' + start,
+          '-map 0:a:' + track,
+          '-c:a aac',
+          '-b:a 128k',
+          '-f adts'
+      ])
+      .on('error', (err) => {
+          if (!err.message.includes('Output stream closed') && !res.headersSent) {
+              console.error('FFmpeg audio stream error:', err.message);
+          }
+      });
+
+    audioCommand.pipe(res);
+  }).catch(err => {
+    if (!res.headersSent) {
+      res.status(500).send("Error fetching audio stream.");
+    }
   });
 });
 
@@ -415,25 +451,50 @@ io.on('connection', (socket) => {
   });
 
   // Admin controls
-  socket.on('fetch_audio_tracks', (url, callback) => {
+  socket.on('fetch_audio_tracks', async (url, callback) => {
     if (!socket.isAdmin) return callback({ success: false, message: 'Unauthorized' });
 
-    ffmpeg.ffprobe(url, (err, metadata) => {
-      if (err) {
-        console.error('Error fetching tracks:', err.message);
-        return callback({ success: false, message: 'Could not fetch metadata' });
-      }
+    try {
+      const parsedUrl = new URL(url);
+      const userAgent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+      const referer = `${parsedUrl.protocol}//${parsedUrl.host}/`;
 
-      const audioStreams = metadata.streams.filter(s => s.codec_type === 'audio');
-      const tracks = audioStreams.map((stream, index) => ({
-        id: index,
-        index: stream.index,
-        language: stream.tags && stream.tags.language ? stream.tags.language : `Track ${index + 1}`,
-        title: stream.tags && stream.tags.title ? stream.tags.title : null
-      }));
+      const response = await axios({
+        method: 'GET',
+        url: url,
+        responseType: 'stream',
+        headers: {
+          'User-Agent': userAgent,
+          'Referer': referer
+        },
+        timeout: 15000,
+        maxRedirects: 10
+      });
 
-      callback({ success: true, tracks });
-    });
+      ffmpeg.ffprobe(response.data, (err, metadata) => {
+        if (response.data && typeof response.data.destroy === 'function') {
+          response.data.destroy();
+        }
+
+        if (err) {
+          console.error('Error fetching tracks:', err.message);
+          return callback({ success: false, message: 'Could not fetch metadata' });
+        }
+
+        const audioStreams = metadata.streams.filter(s => s.codec_type === 'audio');
+        const tracks = audioStreams.map((stream, index) => ({
+          id: index,
+          index: stream.index,
+          language: stream.tags && stream.tags.language ? stream.tags.language : `Track ${index + 1}`,
+          title: stream.tags && stream.tags.title ? stream.tags.title : null
+        }));
+
+        callback({ success: true, tracks });
+      });
+    } catch (e) {
+      console.error('Error fetching tracks stream:', e.message);
+      return callback({ success: false, message: 'Could not fetch metadata (stream error)' });
+    }
   });
 
   socket.on('set_video', (data) => {
